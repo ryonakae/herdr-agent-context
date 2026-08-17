@@ -1,0 +1,4 @@
+/bin/
+/target/
+/dist/
+.DS_Store

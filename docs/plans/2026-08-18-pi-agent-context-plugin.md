@@ -187,8 +187,8 @@ pane release      -> clear tokens -> remove binding/cache for pane
 
 ## Progress
 
-- [ ] Task 1: Establish the Rust package, config contract, and tree-aware Pi parser.
-- [ ] Task 2: Resolve Pi session roots and implement authoritative/sticky pane binding.
+- [x] Task 1: Establish the Rust package, config contract, and tree-aware Pi parser.
+- [x] Task 2: Resolve Pi session roots and implement authoritative/sticky pane binding.
 - [ ] Task 3: Implement the Herdr protocol 19 socket client and metadata contract.
 - [ ] Task 4: Deliver the long-running listener with reconciliation, polling, TTL, and failure recovery.
 - [ ] Task 5: Package the plugin and document installation, configuration, privacy, and manual validation.
