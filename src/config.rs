@@ -2,6 +2,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::time::SystemTime;
 use thiserror::Error;
 
 pub const DEFAULT_POLL_INTERVAL_MS: u64 = 2_000;
@@ -47,6 +48,64 @@ pub enum ConfigError {
     TtlTooLarge,
     #[error("a configured Pi session directory is not absolute after expansion")]
     RelativeSessionDir,
+}
+
+#[derive(Debug)]
+pub enum ConfigReload {
+    Unchanged,
+    Updated(Config),
+    Invalid,
+}
+
+pub struct ConfigWatcher {
+    path: PathBuf,
+    home: PathBuf,
+    initialized: bool,
+    identity: Option<(u64, SystemTime)>,
+}
+
+impl ConfigWatcher {
+    pub fn new(config_dir: &Path, home: &Path) -> Self {
+        Self {
+            path: config_dir.join("config.toml"),
+            home: home.to_owned(),
+            initialized: false,
+            identity: None,
+        }
+    }
+
+    pub fn poll(&mut self) -> ConfigReload {
+        let metadata = match fs::metadata(&self.path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let changed = !self.initialized || self.identity.is_some();
+                self.initialized = true;
+                self.identity = None;
+                return if changed {
+                    ConfigReload::Updated(Config::default())
+                } else {
+                    ConfigReload::Unchanged
+                };
+            }
+            Err(_) => return ConfigReload::Invalid,
+        };
+        let identity = (
+            metadata.len(),
+            metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+        );
+        if self.initialized && self.identity == Some(identity) {
+            return ConfigReload::Unchanged;
+        }
+        self.initialized = true;
+        self.identity = Some(identity);
+        match fs::read_to_string(&self.path)
+            .map_err(ConfigError::Read)
+            .and_then(|input| Config::from_toml(&input, &self.home))
+        {
+            Ok(config) => ConfigReload::Updated(config),
+            Err(_) => ConfigReload::Invalid,
+        }
+    }
 }
 
 impl Config {
@@ -184,6 +243,24 @@ mod tests {
         assert!(
             Config::from_toml("pi_session_dirs = [\"relative\"]", Path::new("/home/me")).is_err()
         );
+    }
+
+    #[test]
+    fn watcher_reports_each_changed_invalid_file_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut watcher = ConfigWatcher::new(temp.path(), Path::new("/home/me"));
+        assert!(matches!(watcher.poll(), ConfigReload::Updated(_)));
+        assert!(matches!(watcher.poll(), ConfigReload::Unchanged));
+
+        fs::write(temp.path().join("config.toml"), "unknown = true").unwrap();
+        assert!(matches!(watcher.poll(), ConfigReload::Invalid));
+        assert!(matches!(watcher.poll(), ConfigReload::Unchanged));
+
+        fs::write(temp.path().join("config.toml"), "poll_interval_ms = 3000").unwrap();
+        let ConfigReload::Updated(config) = watcher.poll() else {
+            panic!("expected valid reload");
+        };
+        assert_eq!(config.poll_interval_ms, 3_000);
     }
 
     #[test]

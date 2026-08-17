@@ -189,8 +189,8 @@ pane release      -> clear tokens -> remove binding/cache for pane
 
 - [x] Task 1: Establish the Rust package, config contract, and tree-aware Pi parser.
 - [x] Task 2: Resolve Pi session roots and implement authoritative/sticky pane binding.
-- [ ] Task 3: Implement the Herdr protocol 19 socket client and metadata contract.
-- [ ] Task 4: Deliver the long-running listener with reconciliation, polling, TTL, and failure recovery.
+- [x] Task 3: Implement the Herdr protocol 19 socket client and metadata contract.
+- [x] Task 4: Deliver the long-running listener with reconciliation, polling, TTL, and failure recovery.
 - [ ] Task 5: Package the plugin and document installation, configuration, privacy, and manual validation.
 - [ ] Task 6: Add release-grade installer, CI, four-target artifacts, and release checks.
 
@@ -319,7 +319,7 @@ Implementation-discovered minor file changes or internal differences must be rec
 
 **Implementation notes:**
 - Generate unique request IDs and match request/response envelopes without assuming response order on a shared connection. If separating request and subscription connections simplifies correctness, preserve one transport abstraction and document the choice in this task.
-- Subscribe to `pane.created`, `pane.updated`, `pane.closed`, `pane.exited`, `pane.agent_detected`, and `pane.agent_status_changed`; unknown/malformed events must not terminate the listener.
+- Subscribe globally to `pane.created`, `pane.updated`, `pane.closed`, `pane.exited`, and `pane.agent_detected`; unknown/malformed events must not terminate the listener. Herdr 0.8.0 requires a concrete `pane_id` for `pane.agent_status_changed`, so the implementation observes status through global `pane.updated` plus the 2-second reconciliation poll instead of pretending a global status subscription exists.
 - Treat pushed event discriminators according to Herdr's snake_case event envelopes even though subscription request names use dotted strings.
 - Decode only required `AgentInfo`, process-info, event, and report response fields. Unknown fields and future enum values should degrade to a reconciliation rather than panic where feasible.
 - `pane.report_metadata` must set source `ryonakae.agent-context`, agent `pi`, default/configured TTL, monotonic per-pane `seq`, and only namespaced tokens. Use nullable tokens to clear.
@@ -330,7 +330,7 @@ Implementation-discovered minor file changes or internal differences must be rec
 **Test cases:**
 - Initial `agent.list` response with optional/unknown fields → required pane data decodes.
 - `pane.process_info` response containing direct or wrapper argv → argument vectors decode without logging unrelated arguments or environment values.
-- Subscription request → contains every required event type and receives acknowledgement before events.
+- Subscription request → contains every globally subscribable required event type and receives acknowledgement before events; status convergence remains covered by polling/runtime tests.
 - Dotted subscription plus snake_case pushed event → event targets the correct pane.
 - Malformed event followed by valid event → malformed event is logged/skipped and valid event is processed.
 - Metadata set report → exact source, agent, token keys, TTL, and increasing sequence; no forbidden fields.
