@@ -72,7 +72,7 @@ pi_session_dirs = ["~/additional/pi/sessions"]
 | `metadata_ttl_ms` | integer | `10000` | Herdr metadata lifetime; must exceed the poll interval. |
 | `pi_session_dirs` | string array | `[]` | Additional Pi session roots. |
 
-Pi session roots follow `PI_CODING_AGENT_SESSION_DIR`, then `PI_CODING_AGENT_DIR/sessions`, then `~/.pi/agent/sessions`. Additional configured roots are merged and deduplicated. Invalid config reloads retain the previous valid settings.
+Pi session roots follow `PI_CODING_AGENT_SESSION_DIR`, then `PI_CODING_AGENT_DIR/sessions`, then `~/.pi/agent/sessions`. Additional configured roots are merged and deduplicated. Root paths must be absolute or start with `~`; a relative configured root rejects the file, while a relative environment root falls back to the next source. The poll interval must be positive; TTL must exceed it and cannot exceed `86400000`. Unknown keys reject the entire file. An invalid first load uses timing defaults without custom roots, while an invalid reload retains the previous valid settings.
 
 ## Privacy and limitations
 

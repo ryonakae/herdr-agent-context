@@ -23,6 +23,9 @@ fi
 
 asset=$(HERDR_AGENT_CONTEXT_OS=Darwin HERDR_AGENT_CONTEXT_ARCH=arm64 "$SCRIPT" --print-asset)
 test "$asset" = "$ASSET"
+test "$(HERDR_AGENT_CONTEXT_OS=Darwin HERDR_AGENT_CONTEXT_ARCH=x86_64 "$SCRIPT" --print-asset)" = "herdr-agent-context-v0.1.0-x86_64-apple-darwin.tar.gz"
+test "$(HERDR_AGENT_CONTEXT_OS=Linux HERDR_AGENT_CONTEXT_ARCH=aarch64 "$SCRIPT" --print-asset)" = "herdr-agent-context-v0.1.0-aarch64-unknown-linux-gnu.tar.gz"
+test "$(HERDR_AGENT_CONTEXT_OS=Linux HERDR_AGENT_CONTEXT_ARCH=amd64 "$SCRIPT" --print-asset)" = "herdr-agent-context-v0.1.0-x86_64-unknown-linux-gnu.tar.gz"
 if HERDR_AGENT_CONTEXT_OS=Plan9 HERDR_AGENT_CONTEXT_ARCH=mips "$SCRIPT" --print-asset >/dev/null 2>&1; then
     echo "installer test: unsupported target unexpectedly succeeded" >&2
     exit 1
@@ -63,6 +66,61 @@ if HERDR_AGENT_CONTEXT_OS=Darwin \
     HERDR_AGENT_CONTEXT_INSTALL_ROOT="$INSTALL" \
     "$SCRIPT" >/dev/null 2>&1; then
     echo "installer test: malformed archive unexpectedly succeeded" >&2
+    exit 1
+fi
+test "$(cat "$INSTALL/bin/herdr-agent-context")" = "existing-binary"
+
+checksum_fixture() {
+    directory=$1
+    if command -v sha256sum >/dev/null 2>&1; then
+        (cd "$directory" && sha256sum "$ASSET" >SHA256SUMS)
+    else
+        sum=$(shasum -a 256 "$directory/$ASSET" | awk '{print $1}')
+        printf '%s  %s\n' "$sum" "$ASSET" >"$directory/SHA256SUMS"
+    fi
+}
+
+mkdir -p "$TMP/symlink-stage" "$TMP/symlink"
+cp "$ROOT/LICENSE" "$TMP/symlink-stage/LICENSE"
+chmod 755 "$TMP/symlink-stage/LICENSE"
+ln -s LICENSE "$TMP/symlink-stage/herdr-agent-context"
+tar -czf "$TMP/symlink/$ASSET" -C "$TMP/symlink-stage" herdr-agent-context LICENSE
+checksum_fixture "$TMP/symlink"
+if HERDR_AGENT_CONTEXT_OS=Darwin \
+    HERDR_AGENT_CONTEXT_ARCH=arm64 \
+    HERDR_AGENT_CONTEXT_BASE_URL="file://$TMP/symlink" \
+    HERDR_AGENT_CONTEXT_INSTALL_ROOT="$INSTALL" \
+    "$SCRIPT" >/dev/null 2>&1; then
+    echo "installer test: symlink binary unexpectedly succeeded" >&2
+    exit 1
+fi
+
+mkdir -p "$TMP/license-symlink-stage" "$TMP/license-symlink"
+cp "$STAGING/herdr-agent-context" "$TMP/license-symlink-stage/herdr-agent-context"
+ln -s herdr-agent-context "$TMP/license-symlink-stage/LICENSE"
+tar -czf "$TMP/license-symlink/$ASSET" -C "$TMP/license-symlink-stage" herdr-agent-context LICENSE
+checksum_fixture "$TMP/license-symlink"
+if HERDR_AGENT_CONTEXT_OS=Darwin \
+    HERDR_AGENT_CONTEXT_ARCH=arm64 \
+    HERDR_AGENT_CONTEXT_BASE_URL="file://$TMP/license-symlink" \
+    HERDR_AGENT_CONTEXT_INSTALL_ROOT="$INSTALL" \
+    "$SCRIPT" >/dev/null 2>&1; then
+    echo "installer test: symlink license unexpectedly succeeded" >&2
+    exit 1
+fi
+
+mkdir -p "$TMP/hardlink-stage" "$TMP/hardlink"
+cp "$ROOT/LICENSE" "$TMP/hardlink-stage/LICENSE"
+chmod 755 "$TMP/hardlink-stage/LICENSE"
+ln "$TMP/hardlink-stage/LICENSE" "$TMP/hardlink-stage/herdr-agent-context"
+tar -czf "$TMP/hardlink/$ASSET" -C "$TMP/hardlink-stage" LICENSE herdr-agent-context
+checksum_fixture "$TMP/hardlink"
+if HERDR_AGENT_CONTEXT_OS=Darwin \
+    HERDR_AGENT_CONTEXT_ARCH=arm64 \
+    HERDR_AGENT_CONTEXT_BASE_URL="file://$TMP/hardlink" \
+    HERDR_AGENT_CONTEXT_INSTALL_ROOT="$INSTALL" \
+    "$SCRIPT" >/dev/null 2>&1; then
+    echo "installer test: hardlink binary unexpectedly succeeded" >&2
     exit 1
 fi
 test "$(cat "$INSTALL/bin/herdr-agent-context")" = "existing-binary"

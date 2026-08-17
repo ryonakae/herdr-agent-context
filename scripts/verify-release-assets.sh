@@ -29,6 +29,11 @@ sha256() {
 }
 
 test -f "$DIST/SHA256SUMS" || fail "SHA256SUMS is missing"
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/herdr-agent-context-verify.XXXXXX")
+trap 'rm -rf "$TMP"' EXIT HUP INT TERM
+link_count() {
+    stat -c %h "$1" 2>/dev/null || stat -f %l "$1"
+}
 expected_names=
 expected_count=0
 for target in $TARGETS; do
@@ -39,6 +44,13 @@ for target in $TARGETS; do
     contents=$(tar -tzf "$DIST/$asset" | LC_ALL=C sort) || fail "release asset is unreadable: $asset"
     test "$contents" = "LICENSE
 herdr-agent-context" || fail "unexpected archive contents: $asset"
+    extracted="$TMP/$target"
+    mkdir "$extracted"
+    tar -xzf "$DIST/$asset" -C "$extracted" || fail "release asset cannot be extracted: $asset"
+    test -f "$extracted/herdr-agent-context" && test ! -L "$extracted/herdr-agent-context" && test -x "$extracted/herdr-agent-context" || fail "release binary is not a regular executable: $asset"
+    test -f "$extracted/LICENSE" && test ! -L "$extracted/LICENSE" || fail "release license is not a regular file: $asset"
+    test "$(link_count "$extracted/herdr-agent-context")" -eq 1 || fail "release binary is linked: $asset"
+    test "$(link_count "$extracted/LICENSE")" -eq 1 || fail "release license is linked: $asset"
     expected_count=$((expected_count + 1))
 done
 

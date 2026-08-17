@@ -123,19 +123,20 @@ pub fn parse_session_text(
         order.push(id.to_owned());
     }
 
-    let leaf_id = order.last().ok_or(SessionError::InvalidTree)?;
     let mut chain_ids = Vec::new();
-    let mut visited = HashSet::new();
-    let mut cursor = Some(leaf_id.as_str());
-    while let Some(id) = cursor {
-        if !visited.insert(id.to_owned()) {
-            return Err(SessionError::InvalidTree);
+    if let Some(leaf_id) = order.last() {
+        let mut visited = HashSet::new();
+        let mut cursor = Some(leaf_id.as_str());
+        while let Some(id) = cursor {
+            if !visited.insert(id.to_owned()) {
+                return Err(SessionError::InvalidTree);
+            }
+            let node = nodes.get(id).ok_or(SessionError::InvalidTree)?;
+            chain_ids.push(id.to_owned());
+            cursor = node.parent_id.as_deref();
         }
-        let node = nodes.get(id).ok_or(SessionError::InvalidTree)?;
-        chain_ids.push(id.to_owned());
-        cursor = node.parent_id.as_deref();
+        chain_ids.reverse();
     }
-    chain_ids.reverse();
 
     let mut first_user_line = None;
     let mut latest_user_index = None;
@@ -198,10 +199,10 @@ fn parse_node_kind(entry: &Value) -> NodeKind {
                 return NodeKind::Other;
             };
             let role = message.get("role").and_then(Value::as_str);
-            let line = message.get("content").and_then(message_text);
+            let content = message.get("content");
             match role {
-                Some("user") => NodeKind::User(line),
-                Some("assistant") => NodeKind::Assistant(line),
+                Some("user") => NodeKind::User(content.and_then(user_message_text)),
+                Some("assistant") => NodeKind::Assistant(content.and_then(assistant_message_text)),
                 _ => NodeKind::Other,
             }
         }
@@ -209,10 +210,18 @@ fn parse_node_kind(entry: &Value) -> NodeKind {
     }
 }
 
-fn message_text(content: &Value) -> Option<String> {
-    if let Some(value) = content.as_str() {
-        return display_line(value);
-    }
+fn user_message_text(content: &Value) -> Option<String> {
+    content
+        .as_str()
+        .and_then(display_line)
+        .or_else(|| block_text(content))
+}
+
+fn assistant_message_text(content: &Value) -> Option<String> {
+    block_text(content)
+}
+
+fn block_text(content: &Value) -> Option<String> {
     let blocks = content.as_array()?;
     for block in blocks {
         if block.get("type").and_then(Value::as_str) == Some("text") {
@@ -292,6 +301,23 @@ mod tests {
     }
 
     #[test]
+    fn header_only_session_uses_cwd_basename() {
+        let view = parse("{\"type\":\"session\",\"id\":\"s1\",\"cwd\":\"/work/project\"}\n");
+        assert_eq!(view.session_name(), Some("project".into()));
+        assert_eq!(view.latest_turn_assistant_line, None);
+    }
+
+    #[test]
+    fn assistant_string_content_is_not_activity() {
+        let view = parse(concat!(
+            "{\"type\":\"session\",\"id\":\"s1\",\"cwd\":\"/work/project\"}\n",
+            "{\"type\":\"message\",\"id\":\"u1\",\"parentId\":null,\"message\":{\"role\":\"user\",\"content\":\"task\"}}\n",
+            "{\"type\":\"message\",\"id\":\"a1\",\"parentId\":\"u1\",\"message\":{\"role\":\"assistant\",\"content\":\"not a text block\"}}\n"
+        ));
+        assert_eq!(view.latest_turn_assistant_line, None);
+    }
+
+    #[test]
     fn cwd_basename_is_last_name_fallback() {
         let view = parse(concat!(
             "{\"type\":\"session\",\"id\":\"s1\",\"cwd\":\"/work/project\"}\n",
@@ -323,7 +349,7 @@ mod tests {
             "{\"type\":\"custom_message\",\"id\":\"c1\",\"parentId\":\"t1\",\"text\":\"custom\"}\n",
             "{\"type\":\"compaction\",\"id\":\"c2\",\"parentId\":\"c1\",\"summary\":\"summary\"}\n",
             "{\"type\":\"branch_summary\",\"id\":\"b1\",\"parentId\":\"c2\",\"summary\":\"branch\"}\n",
-            "{\"type\":\"message\",\"id\":\"a1\",\"parentId\":\"b1\",\"message\":{\"role\":\"assistant\",\"content\":\"visible\"}}\n"
+            "{\"type\":\"message\",\"id\":\"a1\",\"parentId\":\"b1\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"visible\"}]}}\n"
         ));
         assert_eq!(view.latest_turn_assistant_line, Some("visible".into()));
     }

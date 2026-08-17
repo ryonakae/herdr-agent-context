@@ -78,10 +78,21 @@ herdr-agent-context" ]; then
     exit 1
 fi
 tar -xzf "$TMP/$ASSET" -C "$TMP"
-test -f "$TMP/herdr-agent-context" || {
-    echo "herdr-agent-context: release archive does not contain the binary" >&2
-    exit 1
+link_count() {
+    stat -c %h "$1" 2>/dev/null || stat -f %l "$1"
 }
+if [ ! -f "$TMP/herdr-agent-context" ] || [ -L "$TMP/herdr-agent-context" ] || [ ! -x "$TMP/herdr-agent-context" ]; then
+    echo "herdr-agent-context: release binary is not a regular executable" >&2
+    exit 1
+fi
+if [ ! -f "$TMP/LICENSE" ] || [ -L "$TMP/LICENSE" ]; then
+    echo "herdr-agent-context: release license is not a regular file" >&2
+    exit 1
+fi
+if [ "$(link_count "$TMP/herdr-agent-context")" -ne 1 ] || [ "$(link_count "$TMP/LICENSE")" -ne 1 ]; then
+    echo "herdr-agent-context: release archive contains linked files" >&2
+    exit 1
+fi
 mkdir -p "$INSTALL_ROOT/bin"
 STAGED="$INSTALL_ROOT/bin/.herdr-agent-context.new.$$"
 cp "$TMP/herdr-agent-context" "$STAGED"

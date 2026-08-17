@@ -150,10 +150,15 @@ impl Runtime {
             .map(|(pane_id, _)| pane_id.clone())
             .collect();
         for pane_id in stale {
-            // A closed pane may reject metadata RPCs. Its state must still be evicted so
-            // reconnects do not retry an impossible clear forever.
-            let _ = self.clear_if_reported(api, &pane_id);
-            self.panes.remove(&pane_id);
+            match self.clear_if_reported(api, &pane_id) {
+                Ok(()) => {
+                    self.panes.remove(&pane_id);
+                }
+                Err(error) if A::is_missing_pane_error(&error) => {
+                    self.panes.remove(&pane_id);
+                }
+                Err(error) => return Err(error),
+            }
         }
         Ok(())
     }
@@ -231,6 +236,7 @@ impl Runtime {
             size: metadata.len(),
             modified_at: metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
         };
+        fs::File::open(path).ok()?;
         if let Some(cached) = self.parsed.get(path) {
             if cached.fingerprint == fingerprint {
                 return cached.view.clone();

@@ -8,7 +8,7 @@ use std::io;
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 fn main() {
     if let Err(error) = run() {
@@ -66,21 +66,30 @@ fn listen_forever(
         let mut transport = match SocketTransport::connect(socket_path) {
             Ok(transport) => transport,
             Err(_) => {
-                thread::sleep(Duration::from_millis(backoff_ms));
-                backoff_ms = (backoff_ms * 2).min(5_000);
+                sleep_with_backoff(&mut backoff_ms);
                 continue;
             }
         };
-        backoff_ms = 250;
         if let Err(error) = runtime.reconcile(&mut transport) {
             eprintln!("herdr-agent-context: initial reconciliation failed: {error}");
+            sleep_with_backoff(&mut backoff_ms);
             continue;
         }
 
+        let mut schedule = PollSchedule::new(
+            Instant::now(),
+            Duration::from_millis(runtime.config().poll_interval_ms),
+        );
         loop {
             if let Some(watcher) = watcher.as_deref_mut() {
                 match watcher.poll() {
-                    ConfigReload::Updated(config) => runtime.set_config(config),
+                    ConfigReload::Updated(config) => {
+                        runtime.set_config(config);
+                        schedule.shorten(
+                            Instant::now(),
+                            Duration::from_millis(runtime.config().poll_interval_ms),
+                        );
+                    }
                     ConfigReload::Invalid => {
                         eprintln!(
                             "herdr-agent-context: invalid plugin config; keeping previous values"
@@ -89,23 +98,75 @@ fn listen_forever(
                     ConfigReload::Unchanged => {}
                 }
             }
-            let timeout = Duration::from_millis(runtime.config().poll_interval_ms);
-            match transport.poll_event(timeout) {
-                EventPoll::Event(event) if event.kind == "pane_updated" => continue,
-                EventPoll::Event(_) => {}
+
+            let event = transport.poll_event(schedule.remaining(Instant::now()));
+            let event_reconcile = match event {
+                EventPoll::Event(event) => event.kind != "pane_updated",
                 EventPoll::Malformed => {
                     eprintln!("herdr-agent-context: skipped malformed Herdr event");
-                    continue;
+                    false
                 }
                 EventPoll::Closed => break,
-                EventPoll::Timeout => {}
+                EventPoll::Timeout => false,
+            };
+            let now = Instant::now();
+            let poll_due = schedule.is_due(now);
+            if !event_reconcile && !poll_due {
+                continue;
             }
             if let Err(error) = runtime.reconcile(&mut transport) {
                 eprintln!("herdr-agent-context: reconciliation failed: {error}");
                 break;
             }
+            if poll_due {
+                schedule.reset(
+                    now,
+                    Duration::from_millis(runtime.config().poll_interval_ms),
+                );
+                backoff_ms = 250;
+            }
+        }
+        sleep_with_backoff(&mut backoff_ms);
+    }
+}
+
+fn sleep_with_backoff(backoff_ms: &mut u64) {
+    thread::sleep(Duration::from_millis(*backoff_ms));
+    *backoff_ms = (*backoff_ms * 2).min(5_000);
+}
+
+struct PollSchedule {
+    deadline: Instant,
+}
+
+impl PollSchedule {
+    fn new(now: Instant, interval: Duration) -> Self {
+        Self {
+            deadline: now + interval,
         }
     }
+
+    fn remaining(&self, now: Instant) -> Duration {
+        self.deadline.saturating_duration_since(now)
+    }
+
+    fn is_due(&self, now: Instant) -> bool {
+        now >= self.deadline
+    }
+
+    fn reset(&mut self, now: Instant, interval: Duration) {
+        self.deadline = now + interval;
+    }
+
+    fn shorten(&mut self, now: Instant, interval: Duration) {
+        self.deadline = self.deadline.min(now + interval);
+    }
+}
+
+fn listener_lock_path(socket_path: &Path) -> PathBuf {
+    let mut path = socket_path.as_os_str().to_os_string();
+    path.push(".agent-context.lock");
+    PathBuf::from(path)
 }
 
 struct ListenerLock {
@@ -114,7 +175,7 @@ struct ListenerLock {
 
 impl ListenerLock {
     fn acquire(socket_path: &Path) -> io::Result<Option<Self>> {
-        let lock_path = socket_path.with_extension("agent-context.lock");
+        let lock_path = listener_lock_path(socket_path);
         let file = OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -131,5 +192,46 @@ impl ListenerLock {
         } else {
             Err(error)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn poll_deadline_is_not_extended_by_events() {
+        let start = Instant::now();
+        let mut schedule = PollSchedule::new(start, Duration::from_secs(2));
+        let original = schedule.deadline;
+        assert!(!schedule.is_due(start + Duration::from_secs(1)));
+        assert_eq!(schedule.deadline, original);
+        assert!(schedule.is_due(start + Duration::from_secs(2)));
+        schedule.reset(start + Duration::from_secs(2), Duration::from_secs(2));
+        assert_eq!(schedule.deadline, start + Duration::from_secs(4));
+    }
+
+    #[test]
+    fn lock_path_preserves_the_complete_socket_name() {
+        assert_ne!(
+            listener_lock_path(Path::new("/tmp/herdr.sock")),
+            listener_lock_path(Path::new("/tmp/herdr.api"))
+        );
+        assert_eq!(
+            listener_lock_path(Path::new("/tmp/herdr.sock")),
+            PathBuf::from("/tmp/herdr.sock.agent-context.lock")
+        );
+    }
+
+    #[test]
+    fn locks_are_scoped_to_the_full_socket_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let first_path = temp.path().join("herdr.sock");
+        let second_path = temp.path().join("herdr.api");
+        let first = ListenerLock::acquire(&first_path).unwrap().unwrap();
+        assert!(ListenerLock::acquire(&first_path).unwrap().is_none());
+        assert!(ListenerLock::acquire(&second_path).unwrap().is_some());
+        drop(first);
+        assert!(ListenerLock::acquire(&first_path).unwrap().is_some());
     }
 }

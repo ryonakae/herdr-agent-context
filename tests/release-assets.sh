@@ -71,7 +71,49 @@ if "$VERIFY" 0.1.0 "$TMP/contents" >/dev/null 2>&1; then
     exit 1
 fi
 
+cp -R "$DIST" "$TMP/symlink"
+mkdir "$TMP/symlink-stage"
+cp "$ROOT/LICENSE" "$TMP/symlink-stage/LICENSE"
+chmod 755 "$TMP/symlink-stage/LICENSE"
+ln -s LICENSE "$TMP/symlink-stage/herdr-agent-context"
+tar -czf "$TMP/symlink/herdr-agent-context-v0.1.0-aarch64-apple-darwin.tar.gz" \
+    -C "$TMP/symlink-stage" herdr-agent-context LICENSE
+checksums "$TMP/symlink"
+if "$VERIFY" 0.1.0 "$TMP/symlink" >/dev/null 2>&1; then
+    echo "release test: symlink binary unexpectedly passed" >&2
+    exit 1
+fi
+
+cp -R "$DIST" "$TMP/license-symlink"
+mkdir "$TMP/license-symlink-stage"
+cp "$STAGING/herdr-agent-context" "$TMP/license-symlink-stage/herdr-agent-context"
+ln -s herdr-agent-context "$TMP/license-symlink-stage/LICENSE"
+tar -czf "$TMP/license-symlink/herdr-agent-context-v0.1.0-aarch64-apple-darwin.tar.gz" \
+    -C "$TMP/license-symlink-stage" herdr-agent-context LICENSE
+checksums "$TMP/license-symlink"
+if "$VERIFY" 0.1.0 "$TMP/license-symlink" >/dev/null 2>&1; then
+    echo "release test: symlink license unexpectedly passed" >&2
+    exit 1
+fi
+
+cp -R "$DIST" "$TMP/hardlink"
+mkdir "$TMP/hardlink-stage"
+cp "$ROOT/LICENSE" "$TMP/hardlink-stage/LICENSE"
+chmod 755 "$TMP/hardlink-stage/LICENSE"
+ln "$TMP/hardlink-stage/LICENSE" "$TMP/hardlink-stage/herdr-agent-context"
+tar -czf "$TMP/hardlink/herdr-agent-context-v0.1.0-aarch64-apple-darwin.tar.gz" \
+    -C "$TMP/hardlink-stage" LICENSE herdr-agent-context
+checksums "$TMP/hardlink"
+if "$VERIFY" 0.1.0 "$TMP/hardlink" >/dev/null 2>&1; then
+    echo "release test: hardlink binary unexpectedly passed" >&2
+    exit 1
+fi
+
 "$ROOT/scripts/verify-version.sh" v0.1.0 "$ROOT" >/dev/null
+if "$ROOT/scripts/verify-version.sh" 0.1.0 "$ROOT" >/dev/null 2>&1; then
+    echo "release test: bare version unexpectedly passed" >&2
+    exit 1
+fi
 mkdir "$TMP/version"
 cp "$ROOT/Cargo.toml" "$TMP/version/Cargo.toml"
 cp "$ROOT/herdr-plugin.toml" "$TMP/version/herdr-plugin.toml"

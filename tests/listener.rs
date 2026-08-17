@@ -11,7 +11,8 @@ use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
 
@@ -25,14 +26,20 @@ struct Report {
     last_message: Option<String>,
 }
 
+#[derive(Debug)]
+enum FakeError {
+    Transient,
+}
+
 struct FakeApi {
     agents: Vec<AgentInfo>,
     process_args: HashMap<String, Vec<String>>,
     reports: Vec<Report>,
+    fail_next_clear: bool,
 }
 
 impl HerdrApi for FakeApi {
-    type Error = ();
+    type Error = FakeError;
 
     fn list_agents(&mut self) -> Result<Vec<AgentInfo>, Self::Error> {
         Ok(self.agents.clone())
@@ -45,6 +52,8 @@ impl HerdrApi for FakeApi {
                 pid: 1,
                 name: "pi".into(),
                 argv: Some(self.process_args.get(pane_id).cloned().unwrap_or_default()),
+                argv0: Some("pi".into()),
+                cmdline: None,
             }],
         })
     }
@@ -58,6 +67,10 @@ impl HerdrApi for FakeApi {
         session_name: Option<&str>,
         last_message: Option<&str>,
     ) -> Result<(), Self::Error> {
+        if self.fail_next_clear && session_name.is_none() && last_message.is_none() {
+            self.fail_next_clear = false;
+            return Err(FakeError::Transient);
+        }
         self.reports.push(Report {
             pane_id: pane_id.into(),
             applies_to_source: applies_to_source.map(ToOwned::to_owned),
@@ -89,6 +102,7 @@ fn fake_api() -> FakeApi {
         agents: vec![agent()],
         process_args: HashMap::from([("w1:p1".into(), vec!["pi".into()])]),
         reports: Vec::new(),
+        fail_next_clear: false,
     }
 }
 
@@ -97,7 +111,7 @@ fn session_text(last_entry: &str) -> String {
         concat!(
             "{{\"type\":\"session\",\"id\":\"s1\",\"cwd\":\"/work/project\"}}\n",
             "{{\"type\":\"message\",\"id\":\"u1\",\"parentId\":null,\"message\":{{\"role\":\"user\",\"content\":\"Build context\"}}}}\n",
-            "{{\"type\":\"message\",\"id\":\"a1\",\"parentId\":\"u1\",\"message\":{{\"role\":\"assistant\",\"content\":\"Initial answer\"}}}}\n",
+            "{{\"type\":\"message\",\"id\":\"a1\",\"parentId\":\"u1\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"Initial answer\"}}]}}}}\n",
             "{last_entry}"
         ),
         last_entry = last_entry
@@ -185,7 +199,7 @@ fn runtime_does_not_refresh_ttl_after_parse_failure_and_recovers() {
     fs::write(
         &session,
         session_text(
-            "{\"type\":\"message\",\"id\":\"a2\",\"parentId\":\"a1\",\"message\":{\"role\":\"assistant\",\"content\":\"Recovered answer\"}}\n",
+            "{\"type\":\"message\",\"id\":\"a2\",\"parentId\":\"a1\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Recovered answer\"}]}}\n",
         ),
     )
     .unwrap();
@@ -195,6 +209,44 @@ fn runtime_does_not_refresh_ttl_after_parse_failure_and_recovers() {
         api.reports[1].last_message.as_deref(),
         Some("Recovered answer")
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn runtime_stops_refreshing_when_cached_session_becomes_unreadable() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let session = temp.path().join("session.jsonl");
+    fs::write(&session, session_text("")).unwrap();
+    let mut runtime = runtime_for(temp.path());
+    let mut api = fake_api();
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(api.reports.len(), 1);
+
+    fs::set_permissions(&session, fs::Permissions::from_mode(0o000)).unwrap();
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(api.reports.len(), 1);
+    fs::set_permissions(&session, fs::Permissions::from_mode(0o600)).unwrap();
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(api.reports.len(), 2);
+}
+
+#[test]
+fn transient_clear_failure_is_retried() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(temp.path().join("session.jsonl"), session_text("")).unwrap();
+    let mut runtime = runtime_for(temp.path());
+    let mut api = fake_api();
+    runtime.reconcile(&mut api).unwrap();
+    api.agents.clear();
+    api.fail_next_clear = true;
+    assert!(runtime.reconcile(&mut api).is_err());
+    assert_eq!(api.reports.len(), 1);
+
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(api.reports.len(), 2);
+    assert_eq!(api.reports[1].session_name, None);
 }
 
 #[test]
@@ -262,6 +314,122 @@ fn listener_restart_uses_a_fresh_monotonic_sequence_epoch() {
 }
 
 #[test]
+fn listener_binary_reconnects_full_syncs_and_rejects_duplicate_owner() {
+    let temp = tempfile::tempdir().unwrap();
+    let socket = temp.path().join("herdr.sock");
+    let sessions = temp.path().join("sessions");
+    let config = temp.path().join("config");
+    fs::create_dir(&sessions).unwrap();
+    fs::create_dir(&config).unwrap();
+    fs::write(sessions.join("session.jsonl"), session_text("")).unwrap();
+    let listener = UnixListener::bind(&socket).unwrap();
+    let (report_tx, report_rx) = mpsc::channel();
+
+    let server = thread::spawn(move || {
+        for cycle in 0..2 {
+            let (event_stream, _) = listener.accept().unwrap();
+            let mut event_reader = BufReader::new(event_stream.try_clone().unwrap());
+            let mut event_writer = event_stream;
+            let mut line = String::new();
+            event_reader.read_line(&mut line).unwrap();
+            let subscribe: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(subscribe["method"], "events.subscribe");
+            writeln!(
+                event_writer,
+                "{}",
+                json!({
+                    "event": "pane_updated",
+                    "data": {"type": "pane_updated", "pane": {"pane_id": "w1:p1"}}
+                })
+            )
+            .unwrap();
+            writeln!(
+                event_writer,
+                "{}",
+                json!({"id": subscribe["id"], "result": {"type": "subscription_started"}})
+            )
+            .unwrap();
+            event_writer.flush().unwrap();
+
+            for method in ["agent.list", "pane.process_info", "pane.report_metadata"] {
+                let (rpc_stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(rpc_stream.try_clone().unwrap());
+                let mut writer = rpc_stream;
+                line.clear();
+                reader.read_line(&mut line).unwrap();
+                let request: Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(request["method"], method);
+                let result = match method {
+                    "agent.list" => json!({
+                        "type": "agent_list",
+                        "agents": [{
+                            "terminal_id": "term-1", "agent": "pi", "agent_status": "working",
+                            "cwd": "/work/project", "foreground_cwd": "/work/project",
+                            "pane_id": "w1:p1", "revision": cycle + 1
+                        }]
+                    }),
+                    "pane.process_info" => json!({
+                        "type": "pane_process_info",
+                        "process_info": {"pane_id": "w1:p1", "foreground_processes": [
+                            {"pid": 1, "name": "pi", "argv": ["pi"]}
+                        ]}
+                    }),
+                    "pane.report_metadata" => {
+                        assert!(request["params"]["tokens"][SESSION_NAME_TOKEN].is_string());
+                        assert!(request["params"]["tokens"][LAST_MESSAGE_TOKEN].is_string());
+                        report_tx
+                            .send(request["params"]["seq"].as_u64().unwrap())
+                            .unwrap();
+                        json!({"type": "ok"})
+                    }
+                    _ => unreachable!(),
+                };
+                writeln!(writer, "{}", json!({"id": request["id"], "result": result})).unwrap();
+                writer.flush().unwrap();
+            }
+            drop(event_writer);
+        }
+    });
+
+    let configure = |command: &mut Command| {
+        command
+            .arg("listen")
+            .env("HERDR_ENV", "1")
+            .env("HERDR_SOCKET_PATH", &socket)
+            .env("HERDR_PLUGIN_CONFIG_DIR", &config)
+            .env("PI_CODING_AGENT_SESSION_DIR", &sessions)
+            .env("HOME", temp.path())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+    };
+    let binary = env!("CARGO_BIN_EXE_herdr-agent-context");
+    let mut command = Command::new(binary);
+    configure(&mut command);
+    let mut child = command.spawn().unwrap();
+    let first_seq = report_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+
+    let mut duplicate_command = Command::new(binary);
+    configure(&mut duplicate_command);
+    let mut duplicate = duplicate_command.spawn().unwrap();
+    let duplicate_status = (0..20)
+        .find_map(|_| {
+            let status = duplicate.try_wait().unwrap();
+            if status.is_none() {
+                thread::sleep(Duration::from_millis(50));
+            }
+            status
+        })
+        .expect("duplicate listener did not exit");
+    assert!(duplicate_status.success());
+
+    let second_seq = report_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert!(second_seq > first_seq);
+    child.kill().unwrap();
+    child.wait().unwrap();
+    server.join().unwrap();
+}
+
+#[test]
 fn socket_transport_subscribes_first_buffers_events_and_uses_exact_metadata_contract() {
     let temp = tempfile::tempdir().unwrap();
     let socket = temp.path().join("herdr.sock");
@@ -323,7 +491,7 @@ fn socket_transport_subscribes_first_buffers_events_and_uses_exact_metadata_cont
                 "pane.process_info" => json!({
                     "type": "pane_process_info",
                     "process_info": {"pane_id": "w1:p1", "foreground_processes": [
-                        {"pid": 1, "name": "bash", "argv": ["pi", "--no-session"]}
+                        {"pid": 1, "name": "bash", "argv": null, "argv0": "pi", "cmdline": "pi --no-session"}
                     ]}
                 }),
                 "pane.report_metadata" => json!({"type": "pane_metadata_reported"}),
@@ -352,7 +520,7 @@ fn socket_transport_subscribes_first_buffers_events_and_uses_exact_metadata_cont
     assert_eq!(agents[0].agent.as_deref(), Some("pi"));
     assert_eq!(
         transport.process_info("w1:p1").unwrap().args(),
-        vec!["pi", "--no-session"]
+        vec!["pi", "pi --no-session"]
     );
     transport
         .report_metadata("w1:p1", Some("native"), 9, 10_000, Some("name"), None)

@@ -52,7 +52,15 @@ impl ProcessInfo {
     pub fn args(&self) -> Vec<String> {
         self.foreground_processes
             .iter()
-            .flat_map(|process| process.argv.iter().flatten().cloned())
+            .flat_map(|process| {
+                process
+                    .argv
+                    .iter()
+                    .flatten()
+                    .cloned()
+                    .chain(process.argv0.iter().cloned())
+                    .chain(process.cmdline.iter().cloned())
+            })
             .collect()
     }
 }
@@ -62,6 +70,8 @@ pub struct Process {
     pub pid: u32,
     pub name: String,
     pub argv: Option<Vec<String>>,
+    pub argv0: Option<String>,
+    pub cmdline: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -198,15 +208,23 @@ mod tests {
         let process: ProcessInfo = serde_json::from_value(json!({
             "pane_id": "w1:p1",
             "foreground_processes": [
-                {"pid": 1, "name": "node", "argv": null, "argv0": "pi"},
-                {"pid": 2, "name": "bash", "argv": ["safehouse", "--", "pi", "--no-session"]}
+                {"pid": 1, "name": "node", "argv": null, "argv0": "pi", "cmdline": "pi --no-session"},
+                {"pid": 2, "name": "bash", "argv": ["safehouse", "--", "pi", "--no-session"], "argv0": "bash", "cmdline": null}
             ],
             "future_field": true
         }))
         .unwrap();
         assert_eq!(
             process.args(),
-            vec!["safehouse", "--", "pi", "--no-session"]
+            vec![
+                "pi",
+                "pi --no-session",
+                "safehouse",
+                "--",
+                "pi",
+                "--no-session",
+                "bash"
+            ]
         );
     }
 }

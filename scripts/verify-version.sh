@@ -14,14 +14,12 @@ CARGO_VERSION=$(awk '
     package && /^version = "/ { gsub(/^version = "|"$/, ""); print; exit }
 ' "$ROOT/Cargo.toml")
 PLUGIN_VERSION=$(sed -n 's/^version = "\([^"]*\)"$/\1/p' "$ROOT/herdr-plugin.toml" | head -n 1)
-TAG_VERSION=${TAG#v}
-
 if [ -z "$CARGO_VERSION" ] || [ -z "$PLUGIN_VERSION" ]; then
     echo "herdr-agent-context: could not read package versions" >&2
     exit 1
 fi
-if [ "$CARGO_VERSION" != "$PLUGIN_VERSION" ] || [ "$CARGO_VERSION" != "$TAG_VERSION" ]; then
-    echo "herdr-agent-context: version mismatch (cargo=$CARGO_VERSION plugin=$PLUGIN_VERSION tag=$TAG_VERSION)" >&2
+if [ "$CARGO_VERSION" != "$PLUGIN_VERSION" ] || [ "$TAG" != "v$CARGO_VERSION" ]; then
+    echo "herdr-agent-context: version mismatch (cargo=$CARGO_VERSION plugin=$PLUGIN_VERSION tag=$TAG)" >&2
     exit 1
 fi
 printf 'herdr-agent-context: version %s is consistent\n' "$CARGO_VERSION"

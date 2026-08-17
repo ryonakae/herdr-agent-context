@@ -156,11 +156,12 @@ pub fn resolve_session_roots(
     let primary = env
         .get("PI_CODING_AGENT_SESSION_DIR")
         .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
+        .and_then(|value| normalize_env_path(Path::new(value), home))
         .or_else(|| {
             env.get("PI_CODING_AGENT_DIR")
                 .filter(|value| !value.is_empty())
-                .map(|value| PathBuf::from(value).join("sessions"))
+                .and_then(|value| normalize_env_path(Path::new(value), home))
+                .map(|path| path.join("sessions"))
         })
         .unwrap_or_else(|| home.join(".pi/agent/sessions"));
 
@@ -172,6 +173,17 @@ pub fn resolve_session_roots(
         }
     }
     roots
+}
+
+fn normalize_env_path(path: &Path, home: &Path) -> Option<PathBuf> {
+    let expanded = if let Ok(rest) = path.strip_prefix("~") {
+        home.join(rest)
+    } else {
+        path.to_owned()
+    };
+    expanded
+        .is_absolute()
+        .then(|| canonical_or_normalized(expanded))
 }
 
 fn normalize_config_path(path: &Path, home: &Path) -> Result<PathBuf, ConfigError> {
@@ -282,10 +294,19 @@ mod tests {
             vec![PathBuf::from("/agent/sessions")]
         );
 
-        env.insert("PI_CODING_AGENT_SESSION_DIR".into(), "/sessions".into());
+        env.insert(
+            "PI_CODING_AGENT_SESSION_DIR".into(),
+            "~/.pi-sessions".into(),
+        );
         assert_eq!(
             resolve_session_roots(&env, home, &[]),
-            vec![PathBuf::from("/sessions")]
+            vec![PathBuf::from("/home/me/.pi-sessions")]
+        );
+
+        env.insert("PI_CODING_AGENT_SESSION_DIR".into(), "relative".into());
+        assert_eq!(
+            resolve_session_roots(&env, home, &[]),
+            vec![PathBuf::from("/agent/sessions")]
         );
     }
 }

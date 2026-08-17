@@ -55,7 +55,7 @@ jobs:
           cp "$binary" "$stage/herdr-agent-context"
           cp LICENSE "$stage/LICENSE"
           tar -czf "dist/herdr-agent-context-v${version}-${{ matrix.target }}.tar.gz" -C "$stage" herdr-agent-context LICENSE
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: herdr-agent-context-${{ matrix.target }}
           path: dist/herdr-agent-context-v*.tar.gz
@@ -68,7 +68,7 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           pattern: herdr-agent-context-*
           path: dist
@@ -80,6 +80,21 @@ jobs:
           (cd dist && sha256sum herdr-agent-context-v*.tar.gz >SHA256SUMS)
           sh scripts/verify-version.sh "$GITHUB_REF_NAME"
           sh scripts/verify-release-assets.sh "$version" dist
+      - name: Smoke-test release installer
+        run: |
+          set -eu
+          install_root=$(mktemp -d)
+          expected=$(mktemp -d)
+          trap 'rm -rf "$install_root" "$expected"' EXIT
+          HERDR_AGENT_CONTEXT_OS=Linux \
+          HERDR_AGENT_CONTEXT_ARCH=x86_64 \
+          HERDR_AGENT_CONTEXT_BASE_URL="file://$PWD/dist" \
+          HERDR_AGENT_CONTEXT_INSTALL_ROOT="$install_root" \
+          sh scripts/install-binary.sh
+          tar -xzf "dist/herdr-agent-context-${GITHUB_REF_NAME}-x86_64-unknown-linux-gnu.tar.gz" \
+            -C "$expected" herdr-agent-context
+          test -x "$install_root/bin/herdr-agent-context"
+          cmp "$expected/herdr-agent-context" "$install_root/bin/herdr-agent-context"
       - uses: softprops/action-gh-release@v2
         with:
           prerelease: true
