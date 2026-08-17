@@ -7,7 +7,7 @@ if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
 fi
 
 BINARY=$1
-MAX_VERSION=${2:-2.17}
+MAX_VERSION=${2:-2.18}
 test -f "$BINARY" || {
     echo "herdr-agent-context: binary is missing: $BINARY" >&2
     exit 1

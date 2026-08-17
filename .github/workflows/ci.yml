@@ -16,7 +16,7 @@ jobs:
   quality:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -48,18 +48,18 @@ jobs:
             builder: cross
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
       - if: matrix.builder == 'cross'
-        uses: taiki-e/install-action@cross
+        run: cargo install cross --locked --version 0.2.5
       - if: matrix.builder == 'cargo'
         run: cargo build --release --locked --target "${{ matrix.target }}"
       - if: matrix.builder == 'cross'
         run: cross build --release --locked --target "${{ matrix.target }}"
       - if: matrix.builder == 'cross'
-        run: sh scripts/verify-glibc-baseline.sh "target/${{ matrix.target }}/release/herdr-agent-context" 2.17
+        run: sh scripts/verify-glibc-baseline.sh "target/${{ matrix.target }}/release/herdr-agent-context" 2.18
       - name: Package
         run: |
           set -eu

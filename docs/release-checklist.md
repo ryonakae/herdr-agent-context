@@ -12,7 +12,7 @@ Run this checklist from a clean checkout before promoting a `v0.1.x` prerelease.
 - [ ] `sh tests/release-assets.sh`
 - [ ] The non-publishing CI matrix built all four supported targets.
 - [ ] `scripts/verify-release-assets.sh` accepted the downloaded matrix artifacts and generated checksums.
-- [ ] The Linux artifacts passed `scripts/verify-glibc-baseline.sh` with baseline `2.17`.
+- [ ] The Linux artifacts passed `scripts/verify-glibc-baseline.sh` with baseline `2.18`.
 
 ## Local plugin setup
 
