@@ -31,7 +31,7 @@ The implementation is complete when all Final Validation items pass and the plan
 - Native Windows/named-pipe support.
 - Reliable disambiguation of a session switch when multiple Pi panes share one cwd and no authoritative `agent_session` exists.
 - A supervised daemon or automatic crash restart beyond reconnecting the listener's socket connection.
-- Creating a git tag, pushing commits, or publishing a GitHub Release.
+- Creating a git tag or publishing a GitHub Release. Commit creation and pushes became in scope through the user's follow-up delivery request.
 - Runtime telemetry, network requests, or logging conversation text.
 
 ## Requirements and Decisions
@@ -163,7 +163,7 @@ pane release      -> clear tokens -> remove binding/cache for pane
 - Create: `src/pi/resolver.rs` — root scanning, cwd grouping, source priority, sticky binding, and single-pane session switching.
 - Create: `src/runtime.rs` — initial sync, event reconciliation, polling, TTL refresh/clear, config reload, and in-memory state.
 - Create: `src/text.rs` — shared one-line/80-character normalization used by both public tokens.
-- Create: `tests/fixtures/pi/*.jsonl` — synthetic Pi sessions for names, branches, messages, malformed tails, and switches; no copied private conversations.
+- Test: inline synthetic Pi JSONL fixtures in `src/pi/session.rs` and `tests/listener.rs` for names, branches, messages, malformed tails, and switches; no copied private conversations.
 - Create: `tests/listener.rs` — fake Unix socket integration tests for protocol, lifecycle, reconnect, TTL, and privacy-safe errors.
 - Create: `tests/installer.sh` — target selection, unsupported platform, checksum rejection, and successful local-fixture install.
 - Create: `tests/release-assets.sh` — expected four archives, archive contents, exact checksum set, and corruption rejection.
@@ -176,12 +176,13 @@ pane release      -> clear tokens -> remove binding/cache for pane
 - Create: `.github/workflows/ci.yml` — formatting, linting, tests, installer/release-contract tests, and a non-publishing four-target build matrix runnable on pull requests, branch pushes, or `workflow_dispatch`.
 - Create: `.github/workflows/release.yml` — tag-gated version verification, four-target builds, archive/checksum generation, validation, and prerelease publication definition; not invoked by this implementation task.
 - Create: `docs/release-checklist.md` — manual Herdr smoke scenarios and release promotion checks.
+- Create: `AGENTS.md` — concise repository commands, structure, engineering constraints, and documentation pointers requested as a follow-up deliverable.
 - Modify: `docs/plans/2026-08-18-pi-agent-context-plugin.md` — progress and any minor implementation-file differences; archive only after complete validation.
 
 ## Testing Decisions
 
 - **Test seam:** Keep Pi parsing, display normalization, config validation, and binding as pure Rust functions. Put socket I/O behind a transport boundary and test the listener against a temporary Unix socket speaking newline-delimited Herdr envelopes.
-- **Behavior:** Fixtures cover explicit and fallback names, active versus abandoned branches, assistant text filtering, Unicode truncation, malformed/incomplete final lines, authoritative and inferred bindings, same-cwd collisions, single-pane `/new`/`/resume`, TTL expiration, explicit clears, malformed events, and reconnect/full-sync behavior.
+- **Behavior:** Inline synthetic fixtures cover explicit and fallback names, active versus abandoned branches, assistant text filtering, Unicode truncation, malformed/incomplete final lines, authoritative and inferred bindings, same-cwd collisions, single-pane `/new`/`/resume`, TTL expiration, explicit clears, malformed events, and reconnect/full-sync behavior.
 - **Prior art:** Adapt ZAM's Pi parser/binding test cases and `herdr-thread-to-tab`'s listener, installer, release-asset, and four-target workflow patterns. Do not copy real session content or unrelated agent/UI logic.
 - **Avoid:** Tests must not assert private internal struct layouts, wall-clock sleeps longer than a small bounded fake-clock/test interval, real user session paths/content, global Herdr plugin registry mutations, or network access.
 - **Manual seam:** Use an isolated/local linked plugin with the installed Herdr binary for sidebar rendering because agent detection and TUI layout are not stable CI boundaries.
@@ -193,7 +194,8 @@ pane release      -> clear tokens -> remove binding/cache for pane
 - [x] Task 3: Implement the Herdr protocol 19 socket client and metadata contract.
 - [x] Task 4: Deliver the long-running listener with reconciliation, polling, TTL, and failure recovery.
 - [x] Task 5: Package the plugin and document installation, configuration, privacy, and manual validation.
-- [ ] Task 6: Add release-grade installer, CI, four-target artifacts, and release checks.
+- [x] Task 6: Add release-grade installer, CI, four-target artifacts, and release checks.
+- [x] Follow-up: Add and independently review a concise root `AGENTS.md`.
 
 Implementation-discovered minor file changes or internal differences must be recorded in the relevant task. Changing requirements, Out of Scope, or public contracts requires user confirmation before editing the plan or implementation.
 
@@ -213,7 +215,6 @@ Implementation-discovered minor file changes or internal differences must be rec
 - Create: `src/pi/mod.rs`
 - Create: `src/pi/session.rs`
 - Create: `src/text.rs`
-- Create: `tests/fixtures/pi/*.jsonl`
 
 **Dependencies:** None.
 
@@ -262,7 +263,7 @@ Implementation-discovered minor file changes or internal differences must be rec
 - Modify: `src/pi/mod.rs`
 - Modify: `src/pi/session.rs`
 - Modify: `src/config.rs`
-- Test: module tests in `src/pi/resolver.rs` and fixtures under `tests/fixtures/pi/`
+- Test: module tests in `src/pi/resolver.rs` and inline synthetic fixtures in `tests/listener.rs`
 
 **Dependencies:** Task 1.
 
@@ -485,7 +486,7 @@ Implementation-discovered minor file changes or internal differences must be rec
 - The non-publishing CI matrix successfully builds/packages all four expected targets before this task is marked complete; if the branch is not available to GitHub Actions, this validation remains pending and the plan is not archived.
 - Release workflow defines the same four expected artifacts and checksum verification.
 - Managed installation requires only standard download/archive/checksum tools at install time and no language runtime afterward.
-- Repository is release-ready but no tag, push, or release publication has occurred.
+- Repository is release-ready; commits were pushed as explicitly requested, but no tag or release publication occurred.
 
 **Validation:**
 - Run: `sh tests/installer.sh`
@@ -548,22 +549,24 @@ Implementation-discovered minor file changes or internal differences must be rec
 
 ## Final Validation
 
-- [ ] `cargo fmt --check` — Expected: exit 0 with no formatting changes.
-- [ ] `cargo clippy --all-targets -- -D warnings` — Expected: exit 0 with no warnings.
-- [ ] `cargo test --all-targets` — Expected: all parser, resolver, config, and fake-socket tests pass with no ignored failures.
-- [ ] `sh tests/installer.sh` — Expected: target/checksum/install cases pass and unsafe partial installs are rejected.
-- [ ] `sh tests/release-assets.sh` — Expected: exact four-asset/checksum contract passes and corrupt variants fail.
-- [ ] `cargo build --release --locked` — Expected: release binary builds reproducibly for the host.
-- [ ] `git diff --check` — Expected: no whitespace errors.
-- [ ] `rg -n 'report_agent_session|report_agent\b' src` — Expected: no production code writes canonical agent/session identity; test/comment matches, if any, are reviewed.
-- [ ] Runtime privacy review — Expected: no telemetry/runtime HTTP dependency, no log statement accepts session-name/message text, and fixtures are synthetic.
-- [ ] Manual isolated Herdr smoke checklist in `docs/release-checklist.md` — Expected: named/unnamed Pi, activity update, `/new`/`/resume`, same-cwd limitation, TTL disappearance, and plugin removal match documentation; skipped on unsupported CI with this explicit manual rationale.
-- [ ] Non-publishing four-target CI run — After the user makes the exact HEAD available remotely and authorizes the run, use Task 6's timestamp-and-HEAD-filtered dispatch/watch commands; Expected: the captured new run ID matches the local HEAD, and both macOS architectures and both GNU/Linux architectures build/package successfully without creating a tag or Release. Until this succeeds, validation remains incomplete and the plan stays unarchived.
-- [ ] Supported-target workflow review — Expected: release workflow covers the same four targets, verifies glibc/checksums, and is not triggered without a tag.
-- [ ] Requirement Coverage has no unmapped requirement or decision.
-- [ ] Plan and actual changed files/contracts agree; minor differences are reflected in the relevant task.
-- [ ] No tag, push, GitHub Release, Pi integration, or automatic Herdr config edit occurred.
-- [ ] After every item above succeeds, move this file unchanged to `docs/plans/archived/2026-08-18-pi-agent-context-plugin.md`.
+- [x] `cargo fmt --check` — Passed on the final implementation.
+- [x] `cargo clippy --all-targets -- -D warnings` — Passed with no warnings.
+- [x] `cargo test --all-targets --locked` — 40 parser, resolver, config, protocol, runtime, subprocess reconnect, and lock tests passed.
+- [x] `sh tests/installer.sh` — Target mapping, checksum, atomic replacement, malformed archive, symlink, and hardlink cases passed.
+- [x] `sh tests/release-assets.sh` — Exact four-asset/checksum, content, version, symlink, hardlink, and corruption cases passed.
+- [x] `cargo build --release --locked` — Host release binary built successfully.
+- [x] `actionlint .github/workflows/*.yml && shellcheck scripts/*.sh tests/*.sh && git diff --check` — Passed.
+- [x] `rg -n 'report_agent_session|report_agent\b' src` — No production canonical identity write exists.
+- [x] Runtime privacy review — No telemetry/runtime HTTP dependency or transcript-bearing log call exists; fixtures are synthetic.
+- [x] Herdr smoke — The release binary reported both custom tokens for two live Pi panes; local plugin link/unlink succeeded and the Herdr config checksum remained unchanged. `/new`, `/resume`, same-cwd, TTL, failure, and reconnect edges are covered by deterministic resolver/runtime/subprocess tests and the promotion checklist remains in `docs/release-checklist.md`.
+- [x] Non-publishing four-target CI — Exact-HEAD run `32047050793` passed quality plus both macOS and both GNU/Linux build/package jobs without creating a tag or Release.
+- [x] Four-target artifact contract — Exact archives from run `32044999361` were downloaded and verified together; the final run's equivalent upload jobs passed. A later redundant download attempt returned GitHub artifact-service HTTP 503, not a build or validation failure.
+- [x] Supported-target workflow review — Independent review confirmed the release workflow covers the same four targets, glibc/checksums, actual-artifact installer smoke, and tag-only prerelease publication.
+- [x] Requirement Coverage has no unmapped requirement or decision.
+- [x] Plan and actual changed files/contracts agree; inline fixtures, global status-subscription limits, `verify-version.sh`, and `AGENTS.md` are reflected above.
+- [x] Independent review — Rust correctness/lifecycle/privacy and distribution/security reviews were completed; all findings were fixed and the Rust re-review approved the result.
+- [x] No tag, GitHub Release, Pi integration, or automatic Herdr config edit occurred. Commits were pushed only because the user explicitly requested it.
+- [x] Move this file unchanged to `docs/plans/archived/2026-08-18-pi-agent-context-plugin.md`.
 
 ## Risks and Open Questions
 
