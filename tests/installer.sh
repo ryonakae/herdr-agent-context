@@ -1,0 +1,70 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+SCRIPT="$ROOT/scripts/install-binary.sh"
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/herdr-agent-context-installer-test.XXXXXX")
+trap 'rm -rf "$TMP"' EXIT HUP INT TERM
+DIST="$TMP/dist"
+STAGING="$TMP/staging"
+INSTALL="$TMP/install"
+mkdir -p "$DIST" "$STAGING" "$INSTALL/bin"
+printf '#!/bin/sh\necho installed\n' >"$STAGING/herdr-agent-context"
+chmod 755 "$STAGING/herdr-agent-context"
+cp "$ROOT/LICENSE" "$STAGING/LICENSE"
+ASSET='herdr-agent-context-v0.1.0-aarch64-apple-darwin.tar.gz'
+tar -czf "$DIST/$ASSET" -C "$STAGING" herdr-agent-context LICENSE
+if command -v sha256sum >/dev/null 2>&1; then
+    (cd "$DIST" && sha256sum "$ASSET" >SHA256SUMS)
+else
+    sum=$(shasum -a 256 "$DIST/$ASSET" | awk '{print $1}')
+    printf '%s  %s\n' "$sum" "$ASSET" >"$DIST/SHA256SUMS"
+fi
+
+asset=$(HERDR_AGENT_CONTEXT_OS=Darwin HERDR_AGENT_CONTEXT_ARCH=arm64 "$SCRIPT" --print-asset)
+test "$asset" = "$ASSET"
+if HERDR_AGENT_CONTEXT_OS=Plan9 HERDR_AGENT_CONTEXT_ARCH=mips "$SCRIPT" --print-asset >/dev/null 2>&1; then
+    echo "installer test: unsupported target unexpectedly succeeded" >&2
+    exit 1
+fi
+
+HERDR_AGENT_CONTEXT_OS=Darwin \
+HERDR_AGENT_CONTEXT_ARCH=arm64 \
+HERDR_AGENT_CONTEXT_BASE_URL="file://$DIST" \
+HERDR_AGENT_CONTEXT_INSTALL_ROOT="$INSTALL" \
+"$SCRIPT" >/dev/null
+cmp "$STAGING/herdr-agent-context" "$INSTALL/bin/herdr-agent-context"
+test -x "$INSTALL/bin/herdr-agent-context"
+
+printf 'existing-binary\n' >"$INSTALL/bin/herdr-agent-context"
+cp -R "$DIST" "$TMP/bad-checksum"
+printf '%064d  %s\n' 0 "$ASSET" >"$TMP/bad-checksum/SHA256SUMS"
+if HERDR_AGENT_CONTEXT_OS=Darwin \
+    HERDR_AGENT_CONTEXT_ARCH=arm64 \
+    HERDR_AGENT_CONTEXT_BASE_URL="file://$TMP/bad-checksum" \
+    HERDR_AGENT_CONTEXT_INSTALL_ROOT="$INSTALL" \
+    "$SCRIPT" >/dev/null 2>&1; then
+    echo "installer test: invalid checksum unexpectedly succeeded" >&2
+    exit 1
+fi
+test "$(cat "$INSTALL/bin/herdr-agent-context")" = "existing-binary"
+
+mkdir "$TMP/malformed"
+tar -czf "$TMP/malformed/$ASSET" -C "$STAGING" LICENSE
+if command -v sha256sum >/dev/null 2>&1; then
+    (cd "$TMP/malformed" && sha256sum "$ASSET" >SHA256SUMS)
+else
+    sum=$(shasum -a 256 "$TMP/malformed/$ASSET" | awk '{print $1}')
+    printf '%s  %s\n' "$sum" "$ASSET" >"$TMP/malformed/SHA256SUMS"
+fi
+if HERDR_AGENT_CONTEXT_OS=Darwin \
+    HERDR_AGENT_CONTEXT_ARCH=arm64 \
+    HERDR_AGENT_CONTEXT_BASE_URL="file://$TMP/malformed" \
+    HERDR_AGENT_CONTEXT_INSTALL_ROOT="$INSTALL" \
+    "$SCRIPT" >/dev/null 2>&1; then
+    echo "installer test: malformed archive unexpectedly succeeded" >&2
+    exit 1
+fi
+test "$(cat "$INSTALL/bin/herdr-agent-context")" = "existing-binary"
+
+printf 'installer tests passed\n'

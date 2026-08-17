@@ -1,0 +1,89 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-14
+            builder: cargo
+          - target: x86_64-apple-darwin
+            os: macos-14
+            builder: cargo
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            builder: cross
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            builder: cross
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: sh scripts/verify-version.sh "${GITHUB_REF_NAME}"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - if: matrix.builder == 'cross'
+        uses: taiki-e/install-action@cross
+      - if: matrix.builder == 'cargo'
+        run: cargo build --release --locked --target "${{ matrix.target }}"
+      - if: matrix.builder == 'cross'
+        run: cross build --release --locked --target "${{ matrix.target }}"
+      - if: matrix.builder == 'cross'
+        run: sh scripts/verify-glibc-baseline.sh "target/${{ matrix.target }}/release/herdr-agent-context" 2.17
+      - name: Package
+        run: |
+          set -eu
+          version=${GITHUB_REF_NAME#v}
+          binary="target/${{ matrix.target }}/release/herdr-agent-context"
+          strip "$binary" || true
+          stage="dist/${{ matrix.target }}"
+          mkdir -p "$stage"
+          cp "$binary" "$stage/herdr-agent-context"
+          cp LICENSE "$stage/LICENSE"
+          tar -czf "dist/herdr-agent-context-v${version}-${{ matrix.target }}.tar.gz" -C "$stage" herdr-agent-context LICENSE
+      - uses: actions/upload-artifact@v4
+        with:
+          name: herdr-agent-context-${{ matrix.target }}
+          path: dist/herdr-agent-context-v*.tar.gz
+          if-no-files-found: error
+
+  publish-prerelease:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: herdr-agent-context-*
+          path: dist
+          merge-multiple: true
+      - name: Verify assets
+        run: |
+          set -eu
+          version=${GITHUB_REF_NAME#v}
+          (cd dist && sha256sum herdr-agent-context-v*.tar.gz >SHA256SUMS)
+          sh scripts/verify-version.sh "$GITHUB_REF_NAME"
+          sh scripts/verify-release-assets.sh "$version" dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          prerelease: true
+          generate_release_notes: true
+          files: |
+            dist/herdr-agent-context-v*.tar.gz
+            dist/SHA256SUMS

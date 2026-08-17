@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --all-targets --locked
+      - run: cargo build --release --locked
+      - run: sh tests/installer.sh
+      - run: sh tests/release-assets.sh
+
+  target-build:
+    name: Build ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-14
+            builder: cargo
+          - target: x86_64-apple-darwin
+            os: macos-14
+            builder: cargo
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            builder: cross
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            builder: cross
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - if: matrix.builder == 'cross'
+        uses: taiki-e/install-action@cross
+      - if: matrix.builder == 'cargo'
+        run: cargo build --release --locked --target "${{ matrix.target }}"
+      - if: matrix.builder == 'cross'
+        run: cross build --release --locked --target "${{ matrix.target }}"
+      - if: matrix.builder == 'cross'
+        run: sh scripts/verify-glibc-baseline.sh "target/${{ matrix.target }}/release/herdr-agent-context" 2.17
+      - name: Package
+        run: |
+          set -eu
+          version=$(sed -n 's/^version = "\([^"]*\)"$/\1/p' herdr-plugin.toml | head -n 1)
+          sh scripts/verify-version.sh "v$version"
+          stage="dist/${{ matrix.target }}"
+          mkdir -p "$stage"
+          cp "target/${{ matrix.target }}/release/herdr-agent-context" "$stage/herdr-agent-context"
+          cp LICENSE "$stage/LICENSE"
+          tar -czf "dist/herdr-agent-context-v${version}-${{ matrix.target }}.tar.gz" -C "$stage" herdr-agent-context LICENSE
+      - uses: actions/upload-artifact@v4
+        with:
+          name: herdr-agent-context-${{ matrix.target }}
+          path: dist/herdr-agent-context-v*-${{ matrix.target }}.tar.gz
+          if-no-files-found: error

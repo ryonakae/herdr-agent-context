@@ -1,0 +1,12 @@
+id = "ryonakae.agent-context"
+name = "Agent Context"
+version = "0.1.0"
+min_herdr_version = "0.8.0"
+description = "Display Pi session names and recent activity in the Herdr sidebar."
+platforms = ["macos", "linux"]
+
+[[startup]]
+command = ["bin/herdr-agent-context", "listen"]
+
+[[build]]
+command = ["sh", "scripts/install-binary.sh"]

@@ -170,6 +170,7 @@ pane release      -> clear tokens -> remove binding/cache for pane
 - Create: `scripts/install-binary.sh` — release asset selection, download, checksum verification, extraction, and executable installation.
 - Create: `scripts/verify-release-assets.sh` — release archive/checksum contract validation.
 - Create: `scripts/verify-glibc-baseline.sh` — GNU/Linux compatibility check used by release CI.
+- Create: `scripts/verify-version.sh` — Cargo/plugin/tag version consistency check used by tests and release CI.
 - Create: `herdr-plugin.toml` — plugin identity, platform constraints, build installer, and startup listener.
 - Modify: `README.md` — product description, installation, manual sidebar config, plugin config, behavior, privacy, limitations, troubleshooting, and local development.
 - Create: `.github/workflows/ci.yml` — formatting, linting, tests, installer/release-contract tests, and a non-publishing four-target build matrix runnable on pull requests, branch pushes, or `workflow_dispatch`.
@@ -191,7 +192,7 @@ pane release      -> clear tokens -> remove binding/cache for pane
 - [x] Task 2: Resolve Pi session roots and implement authoritative/sticky pane binding.
 - [x] Task 3: Implement the Herdr protocol 19 socket client and metadata contract.
 - [x] Task 4: Deliver the long-running listener with reconciliation, polling, TTL, and failure recovery.
-- [ ] Task 5: Package the plugin and document installation, configuration, privacy, and manual validation.
+- [x] Task 5: Package the plugin and document installation, configuration, privacy, and manual validation.
 - [ ] Task 6: Add release-grade installer, CI, four-target artifacts, and release checks.
 
 Implementation-discovered minor file changes or internal differences must be recorded in the relevant task. Changing requirements, Out of Scope, or public contracts requires user confirmation before editing the plan or implementation.
@@ -452,6 +453,7 @@ Implementation-discovered minor file changes or internal differences must be rec
 - Create: `scripts/install-binary.sh`
 - Create: `scripts/verify-release-assets.sh`
 - Create: `scripts/verify-glibc-baseline.sh`
+- Create: `scripts/verify-version.sh`
 - Create: `tests/installer.sh`
 - Create: `tests/release-assets.sh`
 - Create: `.github/workflows/ci.yml`
@@ -492,8 +494,8 @@ Implementation-discovered minor file changes or internal differences must be rec
 - Expected: Prints release asset success and proves missing/extra/corrupt assets fail.
 - Run: `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test --all-targets && cargo build --release --locked`
 - Expected: Every command exits 0 without warnings or test failures.
-- Run: `git diff --check`
-- Expected: Exit 0 with no whitespace errors.
+- Run: `actionlint .github/workflows/*.yml && shellcheck scripts/*.sh tests/*.sh && git diff --check`
+- Expected: Exit 0 with valid workflows, warning-free shell scripts, and no whitespace errors.
 - Run after the user makes the exact HEAD available remotely and authorizes a non-publishing workflow run:
   ```sh
   branch=$(git branch --show-current)
