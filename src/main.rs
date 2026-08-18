@@ -39,19 +39,20 @@ fn run() -> Result<(), String> {
         .map(PathBuf::from)
         .ok_or_else(|| "HOME is not set".to_owned())?;
     let environment: HashMap<String, String> = env::vars()
-        .filter(|(key, _)| key == "PI_CODING_AGENT_SESSION_DIR" || key == "PI_CODING_AGENT_DIR")
+        .filter(|(key, _)| {
+            key == "PI_CODING_AGENT_SESSION_DIR"
+                || key == "PI_CODING_AGENT_DIR"
+                || key == "CLAUDE_CONFIG_DIR"
+        })
         .collect();
     let mut watcher = env::var_os("HERDR_PLUGIN_CONFIG_DIR")
         .map(PathBuf::from)
         .map(|directory| ConfigWatcher::new(&directory, &home));
-    let initial_config = match watcher.as_mut().map(ConfigWatcher::poll) {
-        Some(ConfigReload::Updated(config)) => config,
-        Some(ConfigReload::Invalid) => {
-            eprintln!("herdr-agent-context: invalid plugin config; using defaults");
-            Config::default()
-        }
-        _ => Config::default(),
-    };
+    let (initial_config, initial_invalid) =
+        initial_config(watcher.as_mut().map(ConfigWatcher::poll));
+    if initial_invalid {
+        eprintln!("herdr-agent-context: invalid plugin config; using defaults");
+    }
     let mut runtime = Runtime::new(initial_config, home, environment);
     listen_forever(&socket_path, watcher.as_mut(), &mut runtime)
 }
@@ -82,20 +83,19 @@ fn listen_forever(
         );
         loop {
             if let Some(watcher) = watcher.as_deref_mut() {
-                match watcher.poll() {
-                    ConfigReload::Updated(config) => {
-                        runtime.set_config(config);
+                match apply_config_reload(runtime, watcher.poll()) {
+                    AppliedConfigReload::Updated => {
                         schedule.shorten(
                             Instant::now(),
                             Duration::from_millis(runtime.config().poll_interval_ms),
                         );
                     }
-                    ConfigReload::Invalid => {
+                    AppliedConfigReload::Invalid => {
                         eprintln!(
                             "herdr-agent-context: invalid plugin config; keeping previous values"
                         );
                     }
-                    ConfigReload::Unchanged => {}
+                    AppliedConfigReload::Unchanged => {}
                 }
             }
 
@@ -127,6 +127,32 @@ fn listen_forever(
             }
         }
         sleep_with_backoff(&mut backoff_ms);
+    }
+}
+
+fn initial_config(reload: Option<ConfigReload>) -> (Config, bool) {
+    match reload {
+        Some(ConfigReload::Updated(config)) => (config, false),
+        Some(ConfigReload::Invalid) => (Config::default(), true),
+        Some(ConfigReload::Unchanged) | None => (Config::default(), false),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AppliedConfigReload {
+    Unchanged,
+    Updated,
+    Invalid,
+}
+
+fn apply_config_reload(runtime: &mut Runtime, reload: ConfigReload) -> AppliedConfigReload {
+    match reload {
+        ConfigReload::Updated(config) => {
+            runtime.set_config(config);
+            AppliedConfigReload::Updated
+        }
+        ConfigReload::Invalid => AppliedConfigReload::Invalid,
+        ConfigReload::Unchanged => AppliedConfigReload::Unchanged,
     }
 }
 
@@ -198,6 +224,34 @@ impl ListenerLock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalid_initial_config_uses_complete_defaults() {
+        let (config, invalid) = initial_config(Some(ConfigReload::Invalid));
+        assert_eq!(config, Config::default());
+        assert!(invalid);
+    }
+
+    #[test]
+    fn invalid_reload_retains_the_complete_runtime_config() {
+        let config = Config::from_toml(
+            concat!(
+                "poll_interval_ms = 3000\n",
+                "metadata_ttl_ms = 12000\n",
+                "[agents.pi]\nsession_dirs = [\"/pi\"]\n",
+                "[agents.claude]\nsession_dirs = [\"/claude\"]\n"
+            ),
+            Path::new("/home/me"),
+        )
+        .unwrap();
+        let mut runtime = Runtime::new(config.clone(), PathBuf::from("/home/me"), HashMap::new());
+
+        assert_eq!(
+            apply_config_reload(&mut runtime, ConfigReload::Invalid),
+            AppliedConfigReload::Invalid
+        );
+        assert_eq!(runtime.config(), &config);
+    }
 
     #[test]
     fn poll_deadline_is_not_extended_by_events() {

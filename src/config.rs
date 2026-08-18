@@ -14,6 +14,7 @@ pub struct Config {
     pub poll_interval_ms: u64,
     pub metadata_ttl_ms: u64,
     pub pi_session_dirs: Vec<PathBuf>,
+    pub claude_session_dirs: Vec<PathBuf>,
 }
 
 impl Default for Config {
@@ -22,6 +23,7 @@ impl Default for Config {
             poll_interval_ms: DEFAULT_POLL_INTERVAL_MS,
             metadata_ttl_ms: DEFAULT_METADATA_TTL_MS,
             pi_session_dirs: Vec::new(),
+            claude_session_dirs: Vec::new(),
         }
     }
 }
@@ -32,6 +34,20 @@ struct RawConfig {
     poll_interval_ms: Option<u64>,
     metadata_ttl_ms: Option<u64>,
     pi_session_dirs: Option<Vec<PathBuf>>,
+    agents: Option<RawAgents>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAgents {
+    pi: Option<RawAgentConfig>,
+    claude: Option<RawAgentConfig>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAgentConfig {
+    session_dirs: Option<Vec<PathBuf>>,
 }
 
 #[derive(Debug, Error)]
@@ -46,8 +62,10 @@ pub enum ConfigError {
     TtlNotGreaterThanPoll,
     #[error("metadata_ttl_ms exceeds the Herdr API limit")]
     TtlTooLarge,
-    #[error("a configured Pi session directory is not absolute after expansion")]
+    #[error("a configured session directory is not absolute after expansion")]
     RelativeSessionDir,
+    #[error("pi_session_dirs conflicts with agents.pi.session_dirs")]
+    ConflictingPiSessionDirs,
 }
 
 #[derive(Debug)]
@@ -111,15 +129,28 @@ impl ConfigWatcher {
 impl Config {
     pub fn from_toml(input: &str, home: &Path) -> Result<Self, ConfigError> {
         let raw: RawConfig = toml::from_str(input).map_err(ConfigError::Parse)?;
+        let agents = raw.agents.unwrap_or_default();
+        if raw.pi_session_dirs.is_some() && agents.pi.is_some() {
+            return Err(ConfigError::ConflictingPiSessionDirs);
+        }
+        let pi_session_dirs = normalize_config_paths(
+            raw.pi_session_dirs
+                .or_else(|| agents.pi.and_then(|pi| pi.session_dirs))
+                .unwrap_or_default(),
+            home,
+        )?;
+        let claude_session_dirs = normalize_config_paths(
+            agents
+                .claude
+                .and_then(|claude| claude.session_dirs)
+                .unwrap_or_default(),
+            home,
+        )?;
         let config = Self {
             poll_interval_ms: raw.poll_interval_ms.unwrap_or(DEFAULT_POLL_INTERVAL_MS),
             metadata_ttl_ms: raw.metadata_ttl_ms.unwrap_or(DEFAULT_METADATA_TTL_MS),
-            pi_session_dirs: raw
-                .pi_session_dirs
-                .unwrap_or_default()
-                .into_iter()
-                .map(|path| normalize_config_path(&path, home))
-                .collect::<Result<Vec<_>, _>>()?,
+            pi_session_dirs,
+            claude_session_dirs,
         };
         config.validate()?;
         Ok(config)
@@ -164,7 +195,24 @@ pub fn resolve_session_roots(
                 .map(|path| path.join("sessions"))
         })
         .unwrap_or_else(|| home.join(".pi/agent/sessions"));
+    merge_roots(primary, additional)
+}
 
+pub fn resolve_claude_project_roots(
+    env: &HashMap<String, String>,
+    home: &Path,
+    additional: &[PathBuf],
+) -> Vec<PathBuf> {
+    let primary = env
+        .get("CLAUDE_CONFIG_DIR")
+        .filter(|value| !value.is_empty())
+        .and_then(|value| normalize_env_path(Path::new(value), home))
+        .map(|path| path.join("projects"))
+        .unwrap_or_else(|| home.join(".claude/projects"));
+    merge_roots(primary, additional)
+}
+
+fn merge_roots(primary: PathBuf, additional: &[PathBuf]) -> Vec<PathBuf> {
     let mut roots = Vec::new();
     for path in std::iter::once(primary).chain(additional.iter().cloned()) {
         let path = canonical_or_normalized(path);
@@ -184,6 +232,13 @@ fn normalize_env_path(path: &Path, home: &Path) -> Option<PathBuf> {
     expanded
         .is_absolute()
         .then(|| canonical_or_normalized(expanded))
+}
+
+fn normalize_config_paths(paths: Vec<PathBuf>, home: &Path) -> Result<Vec<PathBuf>, ConfigError> {
+    paths
+        .into_iter()
+        .map(|path| normalize_config_path(&path, home))
+        .collect()
 }
 
 fn normalize_config_path(path: &Path, home: &Path) -> Result<PathBuf, ConfigError> {
@@ -258,6 +313,47 @@ mod tests {
     }
 
     #[test]
+    fn structured_pi_directories_match_legacy_config() {
+        let config = Config::from_toml(
+            "[agents.pi]\nsession_dirs = [\"~/sessions\", \"/extra\"]",
+            Path::new("/home/me"),
+        )
+        .unwrap();
+        assert_eq!(
+            config.pi_session_dirs,
+            vec![PathBuf::from("/home/me/sessions"), PathBuf::from("/extra")]
+        );
+    }
+
+    #[test]
+    fn structured_claude_directories_are_normalized() {
+        let config = Config::from_toml(
+            "[agents.claude]\nsession_dirs = [\"~/claude-projects\", \"/extra\"]",
+            Path::new("/home/me"),
+        )
+        .unwrap();
+        assert_eq!(
+            config.claude_session_dirs,
+            vec![
+                PathBuf::from("/home/me/claude-projects"),
+                PathBuf::from("/extra")
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_conflicting_or_unknown_structured_agent_config() {
+        let home = Path::new("/home/me");
+        assert!(
+            Config::from_toml("pi_session_dirs = []\n[agents.pi]\nsession_dirs = []", home)
+                .is_err()
+        );
+        assert!(Config::from_toml("[agents.codex]\nsession_dirs = []", home).is_err());
+        assert!(Config::from_toml("[agents.pi]\nunknown = true", home).is_err());
+        assert!(Config::from_toml("[agents.pi]\nsession_dirs = [\"relative\"]", home).is_err());
+    }
+
+    #[test]
     fn watcher_reports_each_changed_invalid_file_once() {
         let temp = tempfile::tempdir().unwrap();
         let mut watcher = ConfigWatcher::new(temp.path(), Path::new("/home/me"));
@@ -307,6 +403,26 @@ mod tests {
         assert_eq!(
             resolve_session_roots(&env, home, &[]),
             vec![PathBuf::from("/agent/sessions")]
+        );
+    }
+
+    #[test]
+    fn resolves_claude_project_roots_from_listener_environment() {
+        let home = Path::new("/home/me");
+        let additions = vec![PathBuf::from("/extra"), PathBuf::from("/extra")];
+        let mut env = HashMap::new();
+        assert_eq!(
+            resolve_claude_project_roots(&env, home, &additions),
+            vec![
+                PathBuf::from("/home/me/.claude/projects"),
+                PathBuf::from("/extra")
+            ]
+        );
+
+        env.insert("CLAUDE_CONFIG_DIR".into(), "~/.claude-work".into());
+        assert_eq!(
+            resolve_claude_project_roots(&env, home, &[]),
+            vec![PathBuf::from("/home/me/.claude-work/projects")]
         );
     }
 }

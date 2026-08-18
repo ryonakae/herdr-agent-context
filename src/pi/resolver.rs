@@ -1,43 +1,11 @@
 use super::session::{SessionError, parse_session_header};
+use crate::backend::{
+    Binding, BindingEvidence, Candidate, DisplayView, PaneInput, PaneKey, ProcessCommand,
+};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
-pub struct PaneKey {
-    pub pane_id: String,
-    pub terminal_id: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SessionReference {
-    pub kind: String,
-    pub value: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PaneInput {
-    pub key: PaneKey,
-    pub agent: String,
-    pub cwd: PathBuf,
-    pub authoritative_session: Option<SessionReference>,
-    pub process_args: Vec<String>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Candidate {
-    pub path: PathBuf,
-    pub cwd: PathBuf,
-    pub size: u64,
-    pub modified_at: SystemTime,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Binding {
-    pub path: PathBuf,
-    pub authoritative: bool,
-}
 
 #[derive(Default)]
 pub struct Resolver {
@@ -73,7 +41,7 @@ impl Resolver {
         let eligible: Vec<_> = panes
             .iter()
             .filter(|pane| pane.agent.eq_ignore_ascii_case("pi"))
-            .filter(|pane| !has_no_session_arg(&pane.process_args))
+            .filter(|pane| !has_no_session_process(&pane.processes))
             .collect();
         let live_keys: HashSet<_> = eligible.iter().map(|pane| pane.key.clone()).collect();
         self.bindings.retain(|key, _| live_keys.contains(key));
@@ -90,7 +58,9 @@ impl Resolver {
                         pane.key.clone(),
                         Binding {
                             path: PathBuf::from(&reference.value),
-                            authoritative: true,
+                            evidence: BindingEvidence::Official {
+                                source: reference.source.clone(),
+                            },
                         },
                     );
                     continue;
@@ -98,7 +68,7 @@ impl Resolver {
             }
 
             let keep = self.bindings.get(&pane.key).is_some_and(|binding| {
-                !binding.authoritative
+                !binding.is_official()
                     && by_path
                         .get(binding.path.as_path())
                         .is_some_and(|candidate| {
@@ -159,7 +129,7 @@ impl Resolver {
                         pane.key.clone(),
                         Binding {
                             path: candidate.path.clone(),
-                            authoritative: false,
+                            evidence: BindingEvidence::LocalFallback,
                         },
                     );
                 }
@@ -177,7 +147,7 @@ impl Resolver {
         let Some(binding) = self.bindings.get(&pane.key).cloned() else {
             return;
         };
-        if binding.authoritative {
+        if binding.is_official() {
             return;
         }
         let Some(bound) = candidates
@@ -208,20 +178,23 @@ impl Resolver {
                 pane.key.clone(),
                 Binding {
                     path: changed[0].path.clone(),
-                    authoritative: false,
+                    evidence: BindingEvidence::LocalFallback,
                 },
             );
         }
     }
 }
 
-pub fn has_no_session_arg(args: &[String]) -> bool {
-    args.iter().any(|argument| {
-        argument == "--no-session"
-            || argument
-                .split_whitespace()
-                .any(|token| token.trim_matches(['\'', '"']) == "--no-session")
-    })
+pub fn has_no_session_process(processes: &[ProcessCommand]) -> bool {
+    processes
+        .iter()
+        .flat_map(ProcessCommand::observable_args)
+        .any(|argument| {
+            argument == "--no-session"
+                || argument
+                    .split_whitespace()
+                    .any(|token| token.trim_matches(['\'', '"']) == "--no-session")
+        })
 }
 
 #[derive(Default)]
@@ -312,13 +285,14 @@ fn canonical_or_original(path: &Path) -> PathBuf {
     fs::canonicalize(path).unwrap_or_else(|_| path.to_owned())
 }
 
-pub fn parse_bound_session(path: &Path) -> Result<super::session::PiSessionView, SessionError> {
-    super::session::parse_session(path)
+pub fn parse_bound_session(path: &Path) -> Result<DisplayView, SessionError> {
+    super::session::parse_session(path).map(|view| view.display_view())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::SessionReference;
     use std::time::Duration;
 
     fn pane(id: &str) -> PaneInput {
@@ -330,7 +304,12 @@ mod tests {
             agent: "pi".into(),
             cwd: "/work".into(),
             authoritative_session: None,
-            process_args: vec!["pi".into()],
+            processes: vec![ProcessCommand {
+                name: "pi".into(),
+                argv: Some(vec!["pi".into()]),
+                argv0: Some("pi".into()),
+                cmdline: None,
+            }],
         }
     }
 
@@ -348,6 +327,8 @@ mod tests {
         let mut resolver = Resolver::default();
         let mut input = pane("p1");
         input.authoritative_session = Some(SessionReference {
+            source: "native-pi".into(),
+            agent: "pi".into(),
             kind: "path".into(),
             value: "/missing/authoritative.jsonl".into(),
         });
@@ -356,7 +337,9 @@ mod tests {
             result[&input.key],
             Binding {
                 path: "/missing/authoritative.jsonl".into(),
-                authoritative: true
+                evidence: BindingEvidence::Official {
+                    source: "native-pi".into()
+                }
             }
         );
     }
@@ -366,6 +349,8 @@ mod tests {
         let mut resolver = Resolver::default();
         let mut input = pane("p1");
         input.authoritative_session = Some(SessionReference {
+            source: "native-pi".into(),
+            agent: "pi".into(),
             kind: "id".into(),
             value: "session-id".into(),
         });
@@ -472,7 +457,12 @@ mod tests {
             &[candidate("/one.jsonl", 10, 1)],
         );
         let mut ephemeral = input.clone();
-        ephemeral.process_args = vec!["sh".into(), "-lc".into(), "pi --no-session".into()];
+        ephemeral.processes = vec![ProcessCommand {
+            name: "sh".into(),
+            argv: Some(vec!["sh".into(), "-lc".into(), "pi --no-session".into()]),
+            argv0: Some("sh".into()),
+            cmdline: None,
+        }];
         assert!(
             resolver
                 .resolve(&[ephemeral], &[candidate("/one.jsonl", 10, 1)])

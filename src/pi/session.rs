@@ -1,3 +1,4 @@
+use crate::backend::DisplayView;
 use crate::text::{display_line, quoted_display_line};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -29,6 +30,14 @@ impl PiSessionView {
                     .and_then(|value| value.to_str())
                     .and_then(display_line)
             })
+    }
+
+    pub fn display_view(&self) -> DisplayView {
+        DisplayView {
+            session_identity: self.session_id.clone(),
+            session_name: self.session_name(),
+            last_message: self.latest_turn_assistant_line.clone(),
+        }
     }
 }
 

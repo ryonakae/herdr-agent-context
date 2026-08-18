@@ -1,3 +1,4 @@
+use super::MetadataReport;
 use super::protocol::{self, AgentInfo, PaneEvent, ProcessInfo};
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
@@ -54,22 +55,15 @@ impl SocketTransport {
         protocol::parse_process_info(result).map_err(SocketError::Json)
     }
 
-    pub fn report_metadata(
-        &mut self,
-        pane_id: &str,
-        applies_to_source: Option<&str>,
-        seq: u64,
-        ttl_ms: u64,
-        session_name: Option<&str>,
-        last_message: Option<&str>,
-    ) -> Result<(), SocketError> {
+    pub fn report_metadata(&mut self, report: MetadataReport<'_>) -> Result<(), SocketError> {
         let params = protocol::metadata_params(
-            pane_id,
-            applies_to_source,
-            seq,
-            ttl_ms,
-            session_name,
-            last_message,
+            report.agent,
+            report.pane_id,
+            report.applies_to_source,
+            report.seq,
+            report.ttl_ms,
+            report.session_name,
+            report.last_message,
         );
         self.rpc.call("pane.report_metadata", params)?;
         Ok(())

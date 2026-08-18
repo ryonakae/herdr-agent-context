@@ -1,46 +1,32 @@
-use crate::config::{Config, resolve_session_roots};
-use crate::herdr::HerdrApi;
-use crate::herdr::protocol::AgentInfo;
-use crate::pi::resolver::{
-    Binding, PaneInput, PaneKey, Resolver, SessionReference, SessionScanner, parse_bound_session,
+use crate::backend::{
+    BackendOutcome, BackendRegistry, Binding, DisplayView, PaneInput, PaneKey, ProcessCommand,
+    SessionReference,
 };
-use crate::pi::session::PiSessionView;
+use crate::config::Config;
+use crate::herdr::{HerdrApi, MetadataReport};
 use std::collections::{HashMap, HashSet};
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub struct Runtime {
     config: Config,
     home: PathBuf,
     env: HashMap<String, String>,
-    resolver: Resolver,
-    scanner: SessionScanner,
+    backends: BackendRegistry,
     panes: HashMap<String, PaneState>,
     sequences: HashMap<String, u64>,
     sequence_epoch: u64,
-    parsed: HashMap<PathBuf, ParsedCache>,
 }
 
 #[derive(Clone, Debug)]
 struct PaneState {
     terminal_id: String,
+    agent: String,
     binding: PathBuf,
+    session_identity: String,
     session_name: Option<String>,
     last_message: Option<String>,
     reported: bool,
-}
-
-#[derive(Clone)]
-struct ParsedCache {
-    fingerprint: FileFingerprint,
-    view: Option<PiSessionView>,
-}
-
-#[derive(Clone, Copy, Eq, PartialEq)]
-struct FileFingerprint {
-    size: u64,
-    modified_at: SystemTime,
 }
 
 impl Runtime {
@@ -49,15 +35,13 @@ impl Runtime {
             config,
             home,
             env,
-            resolver: Resolver::default(),
-            scanner: SessionScanner::default(),
+            backends: BackendRegistry::default(),
             panes: HashMap::new(),
             sequences: HashMap::new(),
             sequence_epoch: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_nanos() as u64,
-            parsed: HashMap::new(),
         }
     }
 
@@ -72,28 +56,35 @@ impl Runtime {
     pub fn reconcile<A: HerdrApi>(&mut self, api: &mut A) -> Result<(), A::Error> {
         let agents = api.list_agents()?;
         let mut pane_inputs = Vec::new();
-        let mut applies_to_sources = HashMap::new();
 
-        for agent in agents.iter().filter(|agent| is_pi(agent)) {
+        for agent in agents
+            .iter()
+            .filter(|agent| self.backends.supports_agent(agent.agent.as_deref()))
+        {
             let Some(cwd) = agent.foreground_cwd.as_ref().or(agent.cwd.as_ref()) else {
                 continue;
             };
-            let process_args = api.process_info(&agent.pane_id)?.args();
+            let processes = api
+                .process_info(&agent.pane_id)?
+                .foreground_processes
+                .into_iter()
+                .map(|process| ProcessCommand {
+                    name: process.name,
+                    argv: process.argv,
+                    argv0: process.argv0,
+                    cmdline: process.cmdline,
+                })
+                .collect();
             let authoritative_session =
                 agent
                     .agent_session
                     .as_ref()
                     .map(|session| SessionReference {
+                        source: session.source.clone(),
+                        agent: session.agent.clone(),
                         kind: session.kind.clone(),
                         value: session.value.clone(),
                     });
-            if let Some(session) = agent
-                .agent_session
-                .as_ref()
-                .filter(|session| session.kind == "path")
-            {
-                applies_to_sources.insert(agent.pane_id.clone(), session.source.clone());
-            }
             pane_inputs.push(PaneInput {
                 key: PaneKey {
                     pane_id: agent.pane_id.clone(),
@@ -102,32 +93,27 @@ impl Runtime {
                 agent: agent.agent.clone().unwrap_or_default(),
                 cwd: PathBuf::from(cwd),
                 authoritative_session,
-                process_args,
+                processes,
             });
         }
 
         self.clear_stale_panes(api, &pane_inputs)?;
-        let roots = resolve_session_roots(&self.env, &self.home, &self.config.pi_session_dirs);
-        let candidates = self.scanner.scan(&roots);
-        let bindings = self.resolver.resolve(&pane_inputs, &candidates);
+        let outcomes = self
+            .backends
+            .reconcile(&self.config, &self.home, &self.env, &pane_inputs);
 
         for pane in &pane_inputs {
-            let Some(binding) = bindings.get(&pane.key) else {
-                self.clear_if_reported(api, &pane.key.pane_id)?;
-                continue;
-            };
-            let Some(view) = self.load_view(&binding.path) else {
-                continue;
-            };
-            self.report_view(
-                api,
-                pane,
-                binding,
-                view,
-                applies_to_sources
-                    .get(&pane.key.pane_id)
-                    .map(String::as_str),
-            )?;
+            match outcomes.get(&pane.key) {
+                Some(BackendOutcome::Resolved {
+                    agent,
+                    binding,
+                    view,
+                }) => self.report_view(api, pane, agent, binding, view.clone())?,
+                Some(BackendOutcome::Failed) => {}
+                Some(BackendOutcome::Unbound) | None => {
+                    self.clear_if_reported(api, &pane.key.pane_id)?;
+                }
+            }
         }
         Ok(())
     }
@@ -167,34 +153,40 @@ impl Runtime {
         &mut self,
         api: &mut A,
         pane: &PaneInput,
+        agent: &str,
         binding: &Binding,
-        view: PiSessionView,
-        applies_to_source: Option<&str>,
+        view: DisplayView,
     ) -> Result<(), A::Error> {
         let previous = self.panes.get(&pane.key.pane_id);
         let same_session = previous.is_some_and(|state| {
-            state.terminal_id == pane.key.terminal_id && state.binding == binding.path
+            state.terminal_id == pane.key.terminal_id
+                && state.agent == agent
+                && state.binding == binding.path
+                && state.session_identity == view.session_identity
         });
-        let last_message = view.latest_turn_assistant_line.clone().or_else(|| {
+        let last_message = view.last_message.or_else(|| {
             same_session
                 .then(|| previous.and_then(|state| state.last_message.clone()))
                 .flatten()
         });
-        let session_name = view.session_name();
+        let session_name = view.session_name;
         let seq = self.next_sequence(&pane.key.pane_id);
-        api.report_metadata(
-            &pane.key.pane_id,
-            applies_to_source,
+        api.report_metadata(MetadataReport {
+            agent,
+            pane_id: &pane.key.pane_id,
+            applies_to_source: binding.applies_to_source(),
             seq,
-            self.config.metadata_ttl_ms,
-            session_name.as_deref(),
-            last_message.as_deref(),
-        )?;
+            ttl_ms: self.config.metadata_ttl_ms,
+            session_name: session_name.as_deref(),
+            last_message: last_message.as_deref(),
+        })?;
         self.panes.insert(
             pane.key.pane_id.clone(),
             PaneState {
                 terminal_id: pane.key.terminal_id.clone(),
+                agent: agent.to_owned(),
                 binding: binding.path.clone(),
+                session_identity: view.session_identity,
                 session_name,
                 last_message,
                 reported: true,
@@ -208,11 +200,24 @@ impl Runtime {
         api: &mut A,
         pane_id: &str,
     ) -> Result<(), A::Error> {
-        if !self.panes.get(pane_id).is_some_and(|state| state.reported) {
+        let Some(agent) = self
+            .panes
+            .get(pane_id)
+            .filter(|state| state.reported)
+            .map(|state| state.agent.clone())
+        else {
             return Ok(());
-        }
+        };
         let seq = self.next_sequence(pane_id);
-        api.report_metadata(pane_id, None, seq, self.config.metadata_ttl_ms, None, None)?;
+        api.report_metadata(MetadataReport {
+            agent: &agent,
+            pane_id,
+            applies_to_source: None,
+            seq,
+            ttl_ms: self.config.metadata_ttl_ms,
+            session_name: None,
+            last_message: None,
+        })?;
         if let Some(state) = self.panes.get_mut(pane_id) {
             state.reported = false;
             state.session_name = None;
@@ -229,34 +234,4 @@ impl Runtime {
         *sequence += 1;
         *sequence
     }
-
-    fn load_view(&mut self, path: &Path) -> Option<PiSessionView> {
-        let metadata = fs::metadata(path).ok()?;
-        let fingerprint = FileFingerprint {
-            size: metadata.len(),
-            modified_at: metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
-        };
-        fs::File::open(path).ok()?;
-        if let Some(cached) = self.parsed.get(path) {
-            if cached.fingerprint == fingerprint {
-                return cached.view.clone();
-            }
-        }
-        let view = parse_bound_session(path).ok();
-        self.parsed.insert(
-            path.to_owned(),
-            ParsedCache {
-                fingerprint,
-                view: view.clone(),
-            },
-        );
-        view
-    }
-}
-
-fn is_pi(agent: &AgentInfo) -> bool {
-    agent
-        .agent
-        .as_deref()
-        .is_some_and(|agent| agent.eq_ignore_ascii_case("pi"))
 }

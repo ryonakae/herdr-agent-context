@@ -98,6 +98,7 @@ pub fn process_info_params(pane_id: &str) -> Value {
 }
 
 pub fn metadata_params(
+    agent: &str,
     pane_id: &str,
     applies_to_source: Option<&str>,
     seq: u64,
@@ -111,7 +112,7 @@ pub fn metadata_params(
     json!({
         "pane_id": pane_id,
         "source": METADATA_SOURCE,
-        "agent": "pi",
+        "agent": agent,
         "applies_to_source": applies_to_source,
         "tokens": tokens,
         "seq": seq,
@@ -191,8 +192,36 @@ mod tests {
     }
 
     #[test]
+    fn metadata_uses_the_selected_backend_agent_label() {
+        let value = metadata_params(
+            "claude",
+            "w1:p1",
+            Some("herdr:claude"),
+            8,
+            10_000,
+            Some("name"),
+            Some("\"activity\""),
+        );
+        assert_eq!(
+            value,
+            json!({
+                "pane_id": "w1:p1",
+                "source": METADATA_SOURCE,
+                "agent": "claude",
+                "applies_to_source": "herdr:claude",
+                "tokens": {
+                    (SESSION_NAME_TOKEN): "name",
+                    (LAST_MESSAGE_TOKEN): "\"activity\""
+                },
+                "seq": 8,
+                "ttl_ms": 10_000
+            })
+        );
+    }
+
+    #[test]
     fn metadata_contains_only_owned_fields_and_nullable_tokens() {
-        let value = metadata_params("w1:p1", Some("native"), 7, 10_000, Some("name"), None);
+        let value = metadata_params("pi", "w1:p1", Some("native"), 7, 10_000, Some("name"), None);
         assert_eq!(value["source"], METADATA_SOURCE);
         assert_eq!(value["agent"], "pi");
         assert_eq!(value["tokens"][SESSION_NAME_TOKEN], "name");

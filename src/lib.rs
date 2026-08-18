@@ -1,3 +1,5 @@
+pub mod backend;
+pub mod claude;
 pub mod config;
 pub mod herdr;
 pub mod pi;
