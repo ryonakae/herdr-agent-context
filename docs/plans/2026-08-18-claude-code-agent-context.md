@@ -560,8 +560,8 @@ Implementation-time minor file changes or internal naming differences must be re
    herdr integration install pi
    herdr integration install claude
    herdr integration status > "$evidence/status-installed.txt"
-   grep -q '^pi: installed ' "$evidence/status-installed.txt"
-   grep -q '^claude: installed ' "$evidence/status-installed.txt"
+   grep -q '^pi: current ' "$evidence/status-installed.txt"
+   grep -q '^claude: current ' "$evidence/status-installed.txt"
    ```
 
    During the disposable-session smoke, set the pane IDs from the creation responses, save redacted authority evidence, and assert exact kinds/sources without retaining transcript values:

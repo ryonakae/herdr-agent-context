@@ -205,7 +205,7 @@ herdr integration install pi
 herdr integration install claude
 ```
 
-- [ ] `herdr integration status` reports Pi and Claude installed.
+- [ ] `herdr integration status` reports Pi and Claude as `current`.
 - [ ] Restart fresh synthetic Pi and Claude sessions so both integrations initialize.
 - [ ] Pi reports `kind=path`, Claude reports `kind=id`, and both values are nonempty.
 - [ ] Metadata reports use `applies_to_source=herdr:pi` or `herdr:claude` for the matching pane.
