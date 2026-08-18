@@ -398,7 +398,7 @@ Implementation-time minor file changes or internal naming differences must be re
 **Dependencies:** Tasks 1-3 establish final public behavior.
 
 **Implementation notes:**
-- Show one `rows_by_agent` example with identical Pi and Claude token rows.
+- Show one shared `[ui.sidebar.agents]` `rows` example so every supported backend uses the same token rows without per-agent duplication.
 - Keep one-command plugin installation first. Explain that official integrations are optional and separately user-controlled; include exact `herdr integration install pi` and `herdr integration install claude` commands in an accuracy/native-resume section, not as automatic setup.
 - Document name precedence, quoted activity, persistent interactive scope, same-project multi-pane conservative behavior, 30-day/25-candidate fallback limits with direct-identity bypass, `CLAUDE_CONFIG_DIR`, tested Claude version, and TTL failure behavior.
 - Document structured config as preferred and legacy `pi_session_dirs` as accepted but mutually exclusive with `[agents.pi]`.

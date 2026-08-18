@@ -73,7 +73,7 @@ herdr plugin list --plugin ryonakae.agent-context --json | jq -e '
 
 ## Disposable Herdr session
 
-Create a temporary Herdr configuration that contains the README's Pi and Claude sidebar rows. From a separate terminal, launch or attach the named session:
+Create a temporary Herdr configuration that contains the README's shared agent sidebar rows. From a separate terminal, launch or attach the named session:
 
 ```sh
 HERDR_CONFIG_PATH="$AGENT_CONTEXT_EVIDENCE_DIR/herdr-config.toml" \

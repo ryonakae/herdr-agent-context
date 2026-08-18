@@ -29,17 +29,11 @@ herdr plugin link .
 
 ## Quickstart
 
-Add the same context rows for Pi and Claude to your Herdr `config.toml`:
+Configure context rows once for all Herdr agents in your `config.toml`:
 
 ```toml
-[ui.sidebar.agents.rows_by_agent]
-pi = [
-  ["state_icon", "workspace", "tab"],
-  ["$agent_context_session_name"],
-  ["$agent_context_last_message"],
-  ["agent"],
-]
-claude = [
+[ui.sidebar.agents]
+rows = [
   ["state_icon", "workspace", "tab"],
   ["$agent_context_session_name"],
   ["$agent_context_last_message"],
