@@ -151,7 +151,7 @@ fn runtime_refreshes_ttl_and_retains_activity_until_replacement() {
     );
     assert_eq!(
         api.reports[0].last_message.as_deref(),
-        Some("Initial answer")
+        Some("\"Initial answer\"")
     );
     assert_eq!(api.reports[0].ttl_ms, 10_000);
 
@@ -170,7 +170,7 @@ fn runtime_refreshes_ttl_and_retains_activity_until_replacement() {
     assert_eq!(api.reports[1].session_name.as_deref(), Some("Renamed"));
     assert_eq!(
         api.reports[1].last_message.as_deref(),
-        Some("Initial answer")
+        Some("\"Initial answer\"")
     );
     assert!(api.reports[1].seq > api.reports[0].seq);
 
@@ -178,7 +178,7 @@ fn runtime_refreshes_ttl_and_retains_activity_until_replacement() {
     assert_eq!(api.reports.len(), 3);
     assert_eq!(
         api.reports[2].last_message.as_deref(),
-        Some("Initial answer")
+        Some("\"Initial answer\"")
     );
 }
 
@@ -207,7 +207,7 @@ fn runtime_does_not_refresh_ttl_after_parse_failure_and_recovers() {
     assert_eq!(api.reports.len(), 2);
     assert_eq!(
         api.reports[1].last_message.as_deref(),
-        Some("Recovered answer")
+        Some("\"Recovered answer\"")
     );
 }
 

@@ -41,14 +41,14 @@ pi = [
 ]
 ```
 
-Restart Herdr or reload its configuration. Pi panes then show the explicit Pi session name, or the first user message/cwd fallback, followed by the latest assistant text.
+Restart Herdr or reload its configuration. Pi panes then show the explicit Pi session name, or the first user message/cwd fallback, followed by the latest assistant text in ASCII double quotes.
 
 ## How context is resolved
 
 - **Authoritative sessions:** An existing Herdr `agent_session` path always wins. The plugin never writes an inferred path back to Herdr.
 - **Hook-free fallback:** Without an authoritative path, the listener matches Pi session files by cwd and keeps pane bindings sticky.
 - **Branch-aware text:** Only the active Pi JSONL branch supplies the first user message and latest assistant activity.
-- **Bounded metadata:** Values are one line and at most 80 Unicode characters. Metadata expires after 10 seconds if the listener cannot refresh it.
+- **Bounded metadata:** Values are one line and at most 80 Unicode characters, including the activity quotes. Metadata expires after 10 seconds if the listener cannot refresh it.
 
 ## Configuration
 

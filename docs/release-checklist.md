@@ -34,7 +34,7 @@ Run this checklist from a clean checkout before promoting a `v0.1.x` prerelease.
 - [ ] Start an unnamed Pi session. The first user text appears as the session name fallback.
 - [ ] Start a Pi session with no user text fixture. The cwd basename appears as the final fallback.
 - [ ] Set a Pi session name. The explicit name replaces the fallback within one poll interval.
-- [ ] Complete an assistant reply. Its first non-empty text line appears as recent activity.
+- [ ] Complete an assistant reply. Its first non-empty text line appears as recent activity enclosed in ASCII double quotes.
 - [ ] Enter a new user message without waiting for a reply. The prior assistant activity remains visible.
 - [ ] Complete the reply. The new assistant activity replaces the retained value.
 - [ ] Confirm multiline and over-80-character text stays on one row and truncates safely.
