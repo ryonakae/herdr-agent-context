@@ -1,6 +1,6 @@
 # Repository guide
 
-`herdr-agent-context` is a Rust Herdr plugin that reads local Pi JSONL sessions and reports privacy-bounded sidebar metadata.
+`herdr-agent-context` is a Rust Herdr plugin that reads local Pi and Claude Code JSONL sessions and reports privacy-bounded sidebar metadata.
 
 ## Common commands
 
@@ -19,8 +19,9 @@ Run the focused Rust test first while developing, then run the full validation s
 
 ## Structure
 
-- `src/pi/session.rs`: Pi v3 JSONL tree parsing and display-value extraction.
-- `src/pi/resolver.rs`: session-root scanning and sticky pane-to-session binding.
+- `src/backend.rs`: shared static backend contracts and Pi/Claude registry.
+- `src/pi/`: Pi v3 JSONL parsing, discovery, and sticky binding.
+- `src/claude/`: branch-aware Claude JSONL parsing, bounded discovery, CLI eligibility, and conservative binding.
 - `src/herdr/`: protocol 19 values and Unix socket transport.
 - `src/runtime.rs`: reconciliation, TTL refresh/clear behavior, and runtime caches.
 - `src/main.rs`: listener lifecycle, polling deadline, reconnect backoff, and socket-scoped lock.
@@ -32,7 +33,7 @@ Read `README.md` for the public installation/configuration contract and `docs/re
 
 ## Implementation constraints
 
-- Keep Pi parsing/resolution independent from Herdr transport. Do not introduce a generic multi-agent layer until another agent is supported.
+- Keep Pi and Claude parsing/resolution independent from Herdr transport. Backends are compiled into the static registry; do not add a dynamic ABI or external backend scripts.
 - Herdr 0.8 raw RPC uses one socket connection per request. Keep the long-lived event subscription separate, subscribe before `agent.list`, and preserve events received before acknowledgement.
 - `pane.report_metadata` emits `pane_updated`. Do not let that event create a reporting loop or postpone the absolute polling deadline.
 - A failed session read/parse may retain in-memory display state, but it must not refresh metadata TTL. Retry transient metadata clears.
@@ -41,7 +42,7 @@ Read `README.md` for the public installation/configuration contract and `docs/re
 
 ## Testing and release rules
 
-- Use TDD for behavior changes. Add synthetic fixtures only; never commit real Pi conversations or user session paths.
+- Use TDD for behavior changes. Add synthetic fixtures only; never commit real Pi/Claude conversations or user session paths.
 - Keep socket tests on temporary Unix sockets. Do not require a running user Herdr session in automated tests.
 - Shell scripts are POSIX `sh`; keep `shellcheck` and negative installer/archive tests passing.
 - Keep package/plugin versions synchronized and the non-publishing four-target matrix green. Follow `docs/release-checklist.md` for packaging changes.

@@ -12,7 +12,7 @@ mkdir -p "$DIST" "$STAGING" "$INSTALL/bin"
 printf '#!/bin/sh\necho installed\n' >"$STAGING/herdr-agent-context"
 chmod 755 "$STAGING/herdr-agent-context"
 cp "$ROOT/LICENSE" "$STAGING/LICENSE"
-ASSET='herdr-agent-context-v0.1.0-aarch64-apple-darwin.tar.gz'
+ASSET='herdr-agent-context-v0.2.0-aarch64-apple-darwin.tar.gz'
 tar -czf "$DIST/$ASSET" -C "$STAGING" herdr-agent-context LICENSE
 if command -v sha256sum >/dev/null 2>&1; then
     (cd "$DIST" && sha256sum "$ASSET" >SHA256SUMS)
@@ -23,9 +23,9 @@ fi
 
 asset=$(HERDR_AGENT_CONTEXT_OS=Darwin HERDR_AGENT_CONTEXT_ARCH=arm64 "$SCRIPT" --print-asset)
 test "$asset" = "$ASSET"
-test "$(HERDR_AGENT_CONTEXT_OS=Darwin HERDR_AGENT_CONTEXT_ARCH=x86_64 "$SCRIPT" --print-asset)" = "herdr-agent-context-v0.1.0-x86_64-apple-darwin.tar.gz"
-test "$(HERDR_AGENT_CONTEXT_OS=Linux HERDR_AGENT_CONTEXT_ARCH=aarch64 "$SCRIPT" --print-asset)" = "herdr-agent-context-v0.1.0-aarch64-unknown-linux-gnu.tar.gz"
-test "$(HERDR_AGENT_CONTEXT_OS=Linux HERDR_AGENT_CONTEXT_ARCH=amd64 "$SCRIPT" --print-asset)" = "herdr-agent-context-v0.1.0-x86_64-unknown-linux-gnu.tar.gz"
+test "$(HERDR_AGENT_CONTEXT_OS=Darwin HERDR_AGENT_CONTEXT_ARCH=x86_64 "$SCRIPT" --print-asset)" = "herdr-agent-context-v0.2.0-x86_64-apple-darwin.tar.gz"
+test "$(HERDR_AGENT_CONTEXT_OS=Linux HERDR_AGENT_CONTEXT_ARCH=aarch64 "$SCRIPT" --print-asset)" = "herdr-agent-context-v0.2.0-aarch64-unknown-linux-gnu.tar.gz"
+test "$(HERDR_AGENT_CONTEXT_OS=Linux HERDR_AGENT_CONTEXT_ARCH=amd64 "$SCRIPT" --print-asset)" = "herdr-agent-context-v0.2.0-x86_64-unknown-linux-gnu.tar.gz"
 if HERDR_AGENT_CONTEXT_OS=Plan9 HERDR_AGENT_CONTEXT_ARCH=mips "$SCRIPT" --print-asset >/dev/null 2>&1; then
     echo "installer test: unsupported target unexpectedly succeeded" >&2
     exit 1
