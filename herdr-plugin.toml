@@ -2,7 +2,7 @@ id = "ryonakae.agent-context"
 name = "Agent Context"
 version = "0.2.0"
 min_herdr_version = "0.8.0"
-description = "Display Pi and Claude Code session context in the Herdr sidebar."
+description = "Display Pi and Claude Code session context in the sidebar and optional tab labels."
 platforms = ["macos", "linux"]
 
 [[startup]]

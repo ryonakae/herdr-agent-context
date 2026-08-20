@@ -210,7 +210,7 @@ Writes use a same-directory temporary file, owner-only permissions, flush/sync a
 - [x] Task 2: Add opt-in configuration and the Herdr topology/rename/event transport contract.
 - [x] Task 3: Implement durable tab ownership, manual overrides, restoration, and crash recovery.
 - [x] Task 4: Integrate focus-debounced tab synchronization with runtime and listener lifecycle.
-- [ ] Task 5: Publish the user-visible contract and complete automated and disposable-session validation.
+- [x] Task 5: Publish the user-visible contract and complete automated and disposable-session validation.
 
 Implementation-time minor file changes or internal naming differences must be recorded in the relevant task. Ask the user before changing requirements, Out of Scope, configuration schema, title precedence, manual-override scope, state format/privacy boundary, compatibility claims, or release contracts.
 
@@ -487,6 +487,13 @@ Implementation-time minor file changes or internal naming differences must be re
 - Run: follow the new tab-name section in `docs/release-checklist.md` in a disposable named Herdr session.
 - Expected: every listed focus/title/manual/restore/restart observation passes; only disposable resources are closed afterward.
 
+**Implementation record:**
+- Updated `README.md` with default-off configuration, Pi/Claude source semantics, independent bounds, focus/manual override behavior, baseline/reorder limits, durable-state privacy, corruption isolation, and forced-stop/plugin-disable/uninstall residue.
+- Updated the plugin description and replaced the obsolete Claude fallback release gate. Added automated and live tab-label gates for default-off traffic, no-title baseline, focus/manual behavior, process exit, restart, config disable, state privacy, and cleanup.
+- The nested named-session client could not start its background server in this Herdr-managed environment. The live smoke used an isolated foreground headless Herdr server under a temporary HOME instead; it exercised the same protocol and plugin listener without touching the current session's topology beyond one temporary nested-server pane.
+- Live Pi and Claude synthetic sessions passed generated/custom title, no-title baseline, Pi/Claude switching, shell retention, manual override return, forced listener stop residue, restart restoration, config disable, and Pi exit restoration. All listeners, agents, synthetic transcripts, temporary panes/servers, state/config directories, and sessions were removed.
+- Full Rust, format, clippy, release build, version, installer, release asset, workflow, shell, and whitespace checks passed. Documentation review found no unresolved issue.
+
 ## Requirement Coverage
 
 | Requirement / Decision | Task | Verification |
@@ -506,23 +513,23 @@ Implementation-time minor file changes or internal naming differences must be re
 
 ## Final Validation
 
-- [ ] `cargo test claude::session::tests --locked` — Expected: current/legacy Claude title, no-fallback, branch, and activity tests pass.
-- [ ] `cargo test text::tests --locked` — Expected: 80-scalar metadata, 15-column grapheme/display-width, and >80-scalar narrow-grapheme independent-derivation tests pass.
-- [ ] `cargo test tab_name::tests --locked` — Expected: ownership, focus, override, baseline, move, transition, and recovery policy tests pass.
-- [ ] `cargo test tab_name::state::tests --locked` — Expected: atomic state, permissions, digest privacy, socket scoping, pending recovery, and corruption tests pass.
-- [ ] `cargo test --test listener tab_name --locked` — Expected: runtime/socket tab-name integration tests pass.
-- [ ] `cargo test --all-targets --locked` — Expected: all Rust tests pass.
-- [ ] `cargo fmt --check` — Expected: no formatting changes required.
-- [ ] `cargo clippy --all-targets -- -D warnings` — Expected: no warnings.
-- [ ] `cargo build --release --locked` — Expected: release build succeeds.
-- [ ] `sh tests/installer.sh` — Expected: all installer positive and negative cases pass.
-- [ ] `sh tests/release-assets.sh` — Expected: archive contract tests pass without version/matrix changes.
-- [ ] `actionlint .github/workflows/*.yml` — Expected: workflow lint passes.
-- [ ] `shellcheck scripts/*.sh tests/*.sh` — Expected: shell lint passes.
-- [ ] `git diff --check` — Expected: no whitespace errors.
-- [ ] Disposable named-session tab-name smoke in `docs/release-checklist.md` — Expected: generated/custom Claude title, Pi name, focus debounce, non-agent retention, manual override, exit restoration, config disable cleanup, and restart recovery all match the contract without using real transcript fixtures.
-- [ ] Requirement Coverage has no unmatched requirement or decision.
-- [ ] The plan and actual changed-file set agree, with minor differences recorded in the relevant task.
+- [x] `cargo test claude::session::tests --locked` — Expected: current/legacy Claude title, no-fallback, branch, and activity tests pass.
+- [x] `cargo test text::tests --locked` — Expected: 80-scalar metadata, 15-column grapheme/display-width, and >80-scalar narrow-grapheme independent-derivation tests pass.
+- [x] `cargo test tab_name::tests --locked` — Expected: ownership, focus, override, baseline, move, transition, and recovery policy tests pass.
+- [x] `cargo test tab_name::state::tests --locked` — Expected: atomic state, permissions, digest privacy, socket scoping, pending recovery, and corruption tests pass.
+- [x] `cargo test --test listener tab_name --locked` — Expected: runtime/socket tab-name integration tests pass.
+- [x] `cargo test --all-targets --locked` — Expected: all Rust tests pass.
+- [x] `cargo fmt --check` — Expected: no formatting changes required.
+- [x] `cargo clippy --all-targets -- -D warnings` — Expected: no warnings.
+- [x] `cargo build --release --locked` — Expected: release build succeeds.
+- [x] `sh tests/installer.sh` — Expected: all installer positive and negative cases pass.
+- [x] `sh tests/release-assets.sh` — Expected: archive contract tests pass without version/matrix changes.
+- [x] `actionlint .github/workflows/*.yml` — Expected: workflow lint passes.
+- [x] `shellcheck scripts/*.sh tests/*.sh` — Expected: shell lint passes.
+- [x] `git diff --check` — Expected: no whitespace errors.
+- [x] Isolated disposable-session tab-name smoke in `docs/release-checklist.md` — Expected: generated/custom Claude title, Pi name, focus debounce, non-agent retention, manual override, exit restoration, config disable cleanup, and restart recovery all match the contract without committing real transcript fixtures.
+- [x] Requirement Coverage has no unmatched requirement or decision.
+- [x] The plan and actual changed-file set agree, with minor differences recorded in the relevant task.
 - [ ] After every item above succeeds, move this file without renaming it to `docs/plans/archived/2026-08-20-herdr-tab-session-titles.md`.
 
 ## Risks and Open Questions

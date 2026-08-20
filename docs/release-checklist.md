@@ -114,7 +114,10 @@ herdr agent prompt context_claude "Reply with a short synthetic Claude status." 
 
 ### Claude Code
 
-- [x] Custom title, latest `ai-title`, first active-branch human text, and cwd basename follow the documented name precedence.
+- [x] Current `customTitle` and legacy `title` records take precedence over the latest matching `ai-title`.
+- [x] Without a matching custom or AI title, the session-name token stays empty even when first-user text and cwd exist.
+- [x] A matching normalized terminal title is accepted; a missing or mismatched terminal title falls back to the verified JSONL title.
+- [x] Live: a newly started Claude session without a custom or AI title leaves the existing tab baseline unchanged.
 - [x] The latest top-level assistant text after the latest human entry appears without added surrounding quotes.
 - [x] Thinking, tool activity, tool results, sidechains, API errors, and abandoned branches never appear.
 - [x] A new human entry retains prior activity; switching to another session does not carry it across.
@@ -128,11 +131,29 @@ herdr agent prompt context_claude "Reply with a short synthetic Claude status." 
 ### Shared behavior
 
 - [x] Multiline values stay on one row; exactly 80 scalars remain unchanged and longer values truncate to 79 scalars plus an ellipsis.
+- [x] Sidebar and tab bounds derive independently from one complete title; a grapheme over 80 scalars stays intact when it fits the 15-column tab limit.
 - [x] Stopping the listener lets metadata expire after TTL; restart performs a full sync.
 - [x] Replacing a pane terminal identity clears the prior terminal's owned metadata.
 - [x] Socket disconnect/reconnect performs a new full sync with a fresh sequence epoch.
 - [x] Invalid plugin config keeps the previous timing and both agents' roots.
 - [x] Plugin logs contain no synthetic title, prompt, or assistant text.
+
+## Optional tab-label behavior
+
+Keep the default-off check separate from the opt-in checks. For the opt-in smoke, back up the plugin's `config.toml`, add `[tab_name] enabled = true`, and restore the exact original file before cleanup. Use only the disposable named session and synthetic agents created above.
+
+- [x] With `[tab_name]` omitted, the listener sends no `session.snapshot` or `tab.rename` request and tab-only events do not refresh metadata.
+- [x] Generated labels use the Pi name or verified Claude title, preserve grapheme clusters, and occupy at most 15 terminal columns.
+- [x] A background tab follows its own `focused_pane_id`; rapid focus changes apply only the final pane after 150 milliseconds without moving the absolute poll deadline.
+- [x] Focusing a shell retains the last selected live agent and does not choose another agent in the tab.
+- [x] A manual rename suppresses only the selected session in that tab. Another session can acquire the tab, and returning restores the exact manual label.
+- [x] Pane moves keep baselines and overrides tab-local. Closing a tab removes its ownership state.
+- [x] Setting `enabled = false` restores the latest baseline. An inferred numeric baseline uses the current workspace-local position after reordering.
+- [x] State and topology failures stop tab synchronization without blocking sidebar metadata. State files contain manual labels but no plaintext generated title, session identity, or socket path.
+- [x] Live: Pi and Claude generated/custom labels, focus switching, shell retention, manual override, config disable, and listener restart match the rules above in an isolated disposable Herdr session.
+- [x] Live: after the selected Pi process exits, the tab restores the exact baseline captured before acquisition.
+- [x] Live: force-stopping the listener leaves the generated custom label; restarting and then setting `enabled = false` restores the saved numeric baseline.
+- [x] The listener, synthetic agents and transcripts, temporary pane, isolated server, state/config directories, and disposable session are removed after the smoke.
 
 ## Temporary official integrations
 

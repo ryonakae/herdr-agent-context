@@ -2,7 +2,7 @@
 
 # Agent Context
 
-**Show Pi and Claude Code session context in the Herdr sidebar**
+**Show Pi and Claude Code session context in the Herdr sidebar and tab bar**
 
 Install one Herdr plugin to read local JSONL sessions without changing agent hooks or settings.
 
@@ -41,7 +41,7 @@ rows = [
 ]
 ```
 
-Restart Herdr or reload its configuration. Each supported pane shows its agent, location, session name, and recent assistant activity.
+Restart Herdr or reload its configuration. Each supported pane shows its agent, location, Pi session name or Claude session title, and recent assistant activity.
 
 ## Exact session binding
 
@@ -77,6 +77,21 @@ Both values use one line and at most 80 Unicode scalars. The activity limit incl
 
 Claude Code support is best effort for the current 2.1.x JSONL structure and was verified with 2.1.220. Unknown records are ignored when safe; broken required structure fails closed for that pane.
 
+## Tab labels
+
+Automatic tab labels are disabled by default. Enable them in the plugin's `config.toml`:
+
+```toml
+[tab_name]
+enabled = true
+```
+
+The listener labels each tab from the supported Pi or Claude Code pane that has focus inside it, including background tabs. Pi uses its resolved session name. Claude uses its verified custom or generated title. Until Claude writes one of those title records, the tab keeps its baseline label. Agent status does not affect label eligibility.
+
+Generated labels occupy at most 15 terminal columns and preserve grapheme clusters. Focus changes wait 150 milliseconds so rapid switches apply only the final pane. Focusing a shell or unsupported pane keeps the last selected supported session while that session remains in the tab.
+
+A manual Herdr tab rename overrides the selected session in that tab. Another session may use its generated label; returning to the overridden session restores the manual label. When the selected session leaves, or when you set `enabled = false`, the listener restores the latest manual baseline. If the initially captured label equals the tab's current workspace-local position, the listener treats it as Herdr's positional label and restores the new position after reordering. A numeric label entered later stays exact. Herdr stores a restored position as a custom label because version 0.8 has no API to clear custom naming.
+
 ## Configuration
 
 Find the plugin configuration directory:
@@ -96,6 +111,9 @@ session_dirs = ["~/additional/pi/sessions"]
 
 [agents.claude]
 session_dirs = ["~/additional/claude/projects"]
+
+[tab_name]
+enabled = true
 ```
 
 | Option | Type | Default | Description |
@@ -104,6 +122,7 @@ session_dirs = ["~/additional/claude/projects"]
 | `metadata_ttl_ms` | integer | `10000` | Herdr metadata lifetime; must exceed the poll interval. |
 | `agents.pi.session_dirs` | string array | `[]` | Additional Pi session roots. |
 | `agents.claude.session_dirs` | string array | `[]` | Additional Claude `projects` roots. |
+| `tab_name.enabled` | boolean | `false` | Synchronize tab labels with the focused supported session. |
 
 Pi roots follow `PI_CODING_AGENT_SESSION_DIR`, then `PI_CODING_AGENT_DIR/sessions`, then `~/.pi/agent/sessions`. Claude roots use `$CLAUDE_CONFIG_DIR/projects` when the listener has that variable, then fall back to `~/.claude/projects`. Configured roots are merged and deduplicated.
 
@@ -122,6 +141,9 @@ Do not combine `pi_session_dirs` with `[agents.pi]`. Paths must be absolute or s
 - Claude fallback scans direct-child JSONL files only in the project directories relevant to live pane cwd values. It considers compatible files from the last 30 days and stops after 25 candidates. Official IDs, exact UUID arguments, and existing sticky bindings bypass those age and count limits.
 - Multiple Claude panes in the same project stay empty on a hook-free cold start unless each pane has official or exact UUID evidence. Existing sticky bindings remain stable.
 - Inferred bindings live in memory. A listener restart resolves them again from current evidence.
+- Tab ownership state lives under `HERDR_PLUGIN_STATE_DIR/tab-name` with owner-only permissions. It stores manual baselines and overrides as plaintext. Session identities, generated labels, and socket identity use SHA-256 digests.
+- A malformed or unsupported ownership file disables tab synchronization for that listener. Sidebar metadata continues.
+- Setting `tab_name.enabled = false` restores owned labels while the listener is running. Force-stopping the listener, disabling or uninstalling the plugin, or deleting its state can leave the last custom tab label in Herdr.
 - Herdr startup hooks do not supervise daemons. If the listener exits, metadata expires and a Herdr restart starts it again.
 
 ## License
