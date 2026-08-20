@@ -4,19 +4,19 @@ Run this checklist from a clean checkout before promoting the `v0.2.0` prereleas
 
 ## Automated gates
 
-- [ ] `cargo fmt --check`
-- [ ] `cargo clippy --all-targets -- -D warnings`
-- [ ] `cargo test --all-targets --locked`
-- [ ] `cargo build --release --locked`
-- [ ] `sh scripts/verify-version.sh v0.2.0`
-- [ ] `sh tests/installer.sh`
-- [ ] `sh tests/release-assets.sh`
-- [ ] `shellcheck scripts/*.sh tests/*.sh`
-- [ ] `actionlint .github/workflows/*.yml`
-- [ ] `git diff --check`
-- [ ] The nonpublishing CI quality job and all four target jobs passed for the proposed release SHA.
-- [ ] Downloaded CI archives passed `scripts/verify-release-assets.sh 0.2.0 <dist>`.
-- [ ] Both Linux archives passed `scripts/verify-glibc-baseline.sh <binary> 2.18`.
+- [x] `cargo fmt --check`
+- [x] `cargo clippy --all-targets -- -D warnings`
+- [x] `cargo test --all-targets --locked`
+- [x] `cargo build --release --locked`
+- [x] `sh scripts/verify-version.sh v0.2.0`
+- [x] `sh tests/installer.sh`
+- [x] `sh tests/release-assets.sh`
+- [x] `shellcheck scripts/*.sh tests/*.sh`
+- [x] `actionlint .github/workflows/*.yml`
+- [x] `git diff --check`
+- [x] The nonpublishing CI quality job and all four target jobs passed for the proposed release SHA.
+- [x] Downloaded CI archives passed `scripts/verify-release-assets.sh 0.2.0 <dist>`.
+- [x] Both Linux archives passed `scripts/verify-glibc-baseline.sh <binary> 2.18`.
 
 ## Evidence and source plugin setup
 
@@ -67,9 +67,9 @@ herdr plugin list --plugin ryonakae.agent-context --json | jq -e '
   .[0].version == "0.2.0" and .[0].source.kind == "local"' >/dev/null
 ```
 
-- [ ] `herdr plugin list --plugin ryonakae.agent-context --json` reports one enabled local `0.2.0` plugin.
-- [ ] No second `herdr-agent-context listen` process is running for the same socket.
-- [ ] Any code or tracked documentation change found during smoke invalidated this evidence directory and restarted validation from a new clean SHA.
+- [x] `herdr plugin list --plugin ryonakae.agent-context --json` reports one enabled local `0.2.0` plugin.
+- [x] No second `herdr-agent-context listen` process is running for the same socket.
+- [x] Any code or tracked documentation change found during smoke invalidated this evidence directory and restarted validation from a new clean SHA.
 
 ## Disposable Herdr session
 
@@ -104,35 +104,35 @@ herdr agent prompt context_claude "Reply with a short synthetic Claude status." 
 
 ### Pi
 
-- [ ] An unnamed session uses the first user text, then cwd basename, as the name fallback.
-- [ ] An explicit Pi session name replaces the fallback within one poll interval.
-- [ ] The latest assistant text appears without added surrounding quotes.
-- [ ] A new user entry retains prior activity until the next assistant text arrives.
-- [ ] `/new` and `/resume` update a single-pane sticky binding without showing another cwd's transcript.
-- [ ] Two same-cwd Pi panes keep established bindings stable.
-- [ ] A visible `--no-session` process clears both plugin-owned tokens.
+- [x] An unnamed session uses the first user text, then cwd basename, as the name fallback.
+- [x] An explicit Pi session name replaces the fallback within one poll interval.
+- [x] The latest assistant text appears without added surrounding quotes.
+- [x] A new user entry retains prior activity until the next assistant text arrives.
+- [x] `/new` and `/resume` update a single-pane sticky binding without showing another cwd's transcript.
+- [x] Two same-cwd Pi panes keep established bindings stable.
+- [x] A visible `--no-session` process clears both plugin-owned tokens.
 
 ### Claude Code
 
-- [ ] Custom title, latest `ai-title`, first active-branch human text, and cwd basename follow the documented name precedence.
-- [ ] The latest top-level assistant text after the latest human entry appears without added surrounding quotes.
-- [ ] Thinking, tool activity, tool results, sidechains, API errors, and abandoned branches never appear.
-- [ ] A new human entry retains prior activity; switching to another session does not carry it across.
-- [ ] `--session-id <uuid>` or UUID `--resume` binds the exact local file without claiming an official source.
-- [ ] Resume by name and `--continue` use local fallback rather than direct identity.
-- [ ] `--print`, `--background`, and `--no-session-persistence` leave the plugin rows empty.
-- [ ] Two same-project Claude panes on a hook-free cold start stay empty without direct evidence.
-- [ ] Established same-project sticky bindings do not reshuffle after unrelated file activity.
-- [ ] A bound incomplete tail does not switch to an older candidate or refresh TTL; repair restores the same binding.
+- [x] Custom title, latest `ai-title`, first active-branch human text, and cwd basename follow the documented name precedence.
+- [x] The latest top-level assistant text after the latest human entry appears without added surrounding quotes.
+- [x] Thinking, tool activity, tool results, sidechains, API errors, and abandoned branches never appear.
+- [x] A new human entry retains prior activity; switching to another session does not carry it across.
+- [x] `--session-id <uuid>` or UUID `--resume` binds the exact local file without claiming an official source.
+- [x] Resume by name and `--continue` use local fallback rather than direct identity.
+- [x] `--print`, `--background`, and `--no-session-persistence` leave the plugin rows empty.
+- [x] Two same-project Claude panes on a hook-free cold start stay empty without direct evidence.
+- [x] Established same-project sticky bindings do not reshuffle after unrelated file activity.
+- [x] A bound incomplete tail does not switch to an older candidate or refresh TTL; repair restores the same binding.
 
 ### Shared behavior
 
-- [ ] Multiline values stay on one row; exactly 80 scalars remain unchanged and longer values truncate to 79 scalars plus an ellipsis.
-- [ ] Stopping the listener lets metadata expire after TTL; restart performs a full sync.
-- [ ] Replacing a pane terminal identity clears the prior terminal's owned metadata.
-- [ ] Socket disconnect/reconnect performs a new full sync with a fresh sequence epoch.
-- [ ] Invalid plugin config keeps the previous timing and both agents' roots.
-- [ ] Plugin logs contain no synthetic title, prompt, or assistant text.
+- [x] Multiline values stay on one row; exactly 80 scalars remain unchanged and longer values truncate to 79 scalars plus an ellipsis.
+- [x] Stopping the listener lets metadata expire after TTL; restart performs a full sync.
+- [x] Replacing a pane terminal identity clears the prior terminal's owned metadata.
+- [x] Socket disconnect/reconnect performs a new full sync with a fresh sequence epoch.
+- [x] Invalid plugin config keeps the previous timing and both agents' roots.
+- [x] Plugin logs contain no synthetic title, prompt, or assistant text.
 
 ## Temporary official integrations
 
@@ -205,13 +205,13 @@ herdr integration install pi
 herdr integration install claude
 ```
 
-- [ ] `herdr integration status` reports Pi and Claude as `current`.
-- [ ] Restart fresh synthetic Pi and Claude sessions so both integrations initialize.
-- [ ] Pi reports `kind=path`, Claude reports `kind=id`, and both values are nonempty.
-- [ ] Metadata reports use `applies_to_source=herdr:pi` or `herdr:claude` for the matching pane.
-- [ ] A newer same-cwd fallback cannot replace an authoritative session.
-- [ ] Missing or malformed authoritative targets do not fall back and do not refresh TTL.
-- [ ] Native Pi and Claude resume keep the exact context after restarting the disposable named session.
+- [x] `herdr integration status` reports Pi and Claude as `current`.
+- [x] Restart fresh synthetic Pi and Claude sessions so both integrations initialize.
+- [x] Pi reports `kind=path`, Claude reports `kind=id`, and both values are nonempty.
+- [x] Metadata reports use `applies_to_source=herdr:pi` or `herdr:claude` for the matching pane.
+- [x] A newer same-cwd fallback cannot replace an authoritative session.
+- [x] Missing or malformed authoritative targets do not fall back and do not refresh TTL.
+- [x] Native Pi and Claude resume keep the exact context after restarting the disposable named session.
 
 In a shell inside the disposable named session, export the same `AGENT_CONTEXT_EVIDENCE_DIR` path and save only identity shape, not identity values or metadata tokens:
 
@@ -252,14 +252,14 @@ fi
 trap - EXIT HUP INT TERM
 ```
 
-- [ ] File presence, link targets, and checksums match exactly after uninstall.
-- [ ] A restoration mismatch stopped release work and was reported for manual review.
+- [x] File presence, link targets, and checksums match exactly after uninstall.
+- [x] No restoration mismatch occurred; any mismatch would have stopped release work for manual review.
 
 ## Cleanup and promotion evidence
 
-- [ ] Cleanup completed through `cleanup_validation`; the managed v0.1.0 plugin is enabled until v0.2.0 promotion completes.
-- [ ] No source listener, temporary integration, disposable pane, or named test session remains.
-- [ ] The repository is clean and `HEAD == origin/main` before exact-SHA CI validation.
+- [x] Temporary validation cleanup completed before promotion; the verified managed v0.2.0 plugin is enabled after promotion.
+- [x] No source listener, temporary integration, disposable pane, or named test session remains.
+- [x] The repository is clean and `HEAD == origin/main` before exact-SHA CI validation.
 
 Select the CI run by immutable SHA, flatten all target artifacts, generate their checksum manifest, and run the same release validators:
 
@@ -295,12 +295,25 @@ for target in aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu; do
 done
 ```
 
-- [ ] Record the exact SHA and CI run ID under `$AGENT_CONTEXT_EVIDENCE_DIR`.
-- [ ] All four downloaded CI archives pass checksum, content, executable, and Linux glibc `2.18` checks.
-- [ ] Independent implementation and distribution review has no unresolved finding.
-- [ ] Obtain explicit promotion approval before creating or pushing `v0.2.0`.
-- [ ] After approval, tag CI and the Release workflow both pass for the recorded SHA.
-- [ ] The public prerelease contains four archives plus `SHA256SUMS`.
-- [ ] Public assets pass `scripts/verify-release-assets.sh 0.2.0`.
-- [ ] The public URL installer installs a host binary byte-identical to its archive.
-- [ ] Replace the managed v0.1.0 plugin with the verified managed v0.2.0 release.
+- [x] Record the exact SHA and CI run ID under `$AGENT_CONTEXT_EVIDENCE_DIR`.
+- [x] All four downloaded CI archives pass checksum, content, executable, and Linux glibc `2.18` checks.
+- [x] Independent implementation and distribution review has no unresolved finding.
+- [x] Obtain explicit promotion approval before creating or pushing `v0.2.0`.
+- [x] After approval, tag CI and the Release workflow both pass for the recorded SHA.
+- [x] The public prerelease contains four archives plus `SHA256SUMS`.
+- [x] Public assets pass `scripts/verify-release-assets.sh 0.2.0`.
+- [x] The public URL installer installs a host binary byte-identical to its archive.
+- [x] Replace the managed v0.1.0 plugin with the verified managed v0.2.0 release.
+
+## v0.2.0 promotion record
+
+- Release SHA: `6f4ed7e918538276c252044b0638c18e1deb368b`.
+- Exact-HEAD pre-release CI: `32337430470`; quality and all four target jobs passed.
+- Tag CI: `32338069478`; quality and all four target jobs passed.
+- Release workflow: `32338069510`; all four builds, asset validation, installer smoke, and prerelease publication passed.
+- Public prerelease: <https://github.com/ryonakae/herdr-agent-context/releases/tag/v0.2.0>.
+- Public assets: four target archives plus `SHA256SUMS`; archive contents, checksums, executable bits, and both Linux glibc `2.18` baselines passed.
+- Public installer host: `Darwin arm64`; asset `herdr-agent-context-v0.2.0-aarch64-apple-darwin.tar.gz`; installed and archived binary SHA-256 `8fa57bf2c5a71706faf5bb6e55db0f693fbf595934dac4433c11ddc5a1e6fa03`.
+- Managed plugin: enabled `v0.2.0`, requested ref `v0.2.0`, resolved commit `6f4ed7e918538276c252044b0638c18e1deb368b`; the running listener uses the managed release binary.
+- Integrations after promotion: Pi and Claude `current (v8)`; Codex remains integration-only and is outside the v0.2.0 transcript backend scope.
+- Independent implementation reviews completed with no unresolved findings; live Herdr dogfood confirmed Pi startup fail-closed behavior and unquoted recent activity.
