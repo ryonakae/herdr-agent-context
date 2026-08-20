@@ -3,6 +3,7 @@ pub mod session;
 
 use crate::backend::{BackendOutcome, Binding, BindingEvidence, CLAUDE_AGENT, PaneInput, PaneKey};
 use crate::config::{Config, resolve_claude_project_roots};
+use crate::text::{complete_line, display_line};
 use resolver::{ClaudeCandidate, ClaudeCliState, ClaudeResolveError, ClaudeScanner, inspect_cli};
 use session::{ClaudeSessionView, parse_session};
 use std::collections::HashMap;
@@ -243,7 +244,7 @@ impl ClaudeBackend {
                     BackendOutcome::Resolved {
                         agent: CLAUDE_AGENT,
                         binding,
-                        view: view.display,
+                        view: verified_terminal_title(view.display, pane.terminal_title.as_deref()),
                     }
                 }
                 _ => BackendOutcome::Failed,
@@ -278,6 +279,25 @@ impl ClaudeBackend {
     }
 }
 
+fn verified_terminal_title(
+    mut display: crate::backend::DisplayView,
+    terminal_title: Option<&str>,
+) -> crate::backend::DisplayView {
+    let Some(jsonl_title) = display.tab_name_source.as_deref() else {
+        return display;
+    };
+    let Some(terminal_title) = terminal_title.and_then(complete_line) else {
+        return display;
+    };
+    if terminal_title != jsonl_title {
+        return display;
+    }
+
+    display.session_name = display_line(&terminal_title);
+    display.tab_name_source = Some(terminal_title);
+    display
+}
+
 fn canonical_or_original(path: &Path) -> PathBuf {
     fs::canonicalize(path).unwrap_or_else(|_| path.to_owned())
 }
@@ -300,6 +320,7 @@ mod tests {
             },
             agent: "claude".into(),
             cwd: PathBuf::from("/work/project"),
+            terminal_title: None,
             authoritative_session: None,
             processes: vec![ProcessCommand {
                 name: "claude".into(),
@@ -396,6 +417,60 @@ mod tests {
             panic!("expected resolved sticky binding");
         };
         assert_eq!(view.session_name.as_deref(), Some("Bound"));
+    }
+
+    #[test]
+    fn terminal_title_requires_a_matching_jsonl_title() {
+        let temp = tempfile::tempdir().unwrap();
+        let session_id = "10000000-0000-4000-8000-000000000001";
+        write_named_session(temp.path(), session_id, "Verified", SystemTime::now());
+        let config = Config {
+            claude_session_dirs: vec![temp.path().to_owned()],
+            ..Config::default()
+        };
+        let mut input = pane("p1");
+        input.terminal_title = Some(" \n Verified \n ignored".into());
+
+        let outcomes = ClaudeBackend::default().reconcile(
+            &config,
+            Path::new("/no-home"),
+            &HashMap::new(),
+            std::slice::from_ref(&input),
+        );
+        let BackendOutcome::Resolved { view, .. } = &outcomes[&input.key] else {
+            panic!("expected resolved session");
+        };
+        assert_eq!(view.session_name.as_deref(), Some("Verified"));
+        assert_eq!(view.tab_name_source.as_deref(), Some("Verified"));
+
+        let mut mismatched = pane("p-mismatch");
+        mismatched.terminal_title = Some("Inherited shell title".into());
+        let outcomes = ClaudeBackend::default().reconcile(
+            &config,
+            Path::new("/no-home"),
+            &HashMap::new(),
+            std::slice::from_ref(&mismatched),
+        );
+        let BackendOutcome::Resolved { view, .. } = &outcomes[&mismatched.key] else {
+            panic!("expected resolved session with mismatched terminal title");
+        };
+        assert_eq!(view.session_name.as_deref(), Some("Verified"));
+        assert_eq!(view.tab_name_source.as_deref(), Some("Verified"));
+
+        write_session(temp.path());
+        let mut input = pane("p2");
+        input.terminal_title = Some("Inherited shell title".into());
+        let outcomes = ClaudeBackend::default().reconcile(
+            &config,
+            Path::new("/no-home"),
+            &HashMap::new(),
+            std::slice::from_ref(&input),
+        );
+        let BackendOutcome::Resolved { view, .. } = &outcomes[&input.key] else {
+            panic!("expected resolved session without title");
+        };
+        assert_eq!(view.session_name, None);
+        assert_eq!(view.tab_name_source, None);
     }
 
     #[test]

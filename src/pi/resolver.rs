@@ -320,6 +320,7 @@ mod tests {
             },
             agent: "pi".into(),
             cwd: "/work".into(),
+            terminal_title: None,
             authoritative_session: None,
             processes: vec![ProcessCommand {
                 name: "pi".into(),

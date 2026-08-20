@@ -1,5 +1,5 @@
 use crate::backend::DisplayView;
-use crate::text::display_line;
+use crate::text::{complete_line, display_line};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -163,9 +163,15 @@ pub fn parse_session_text(input: &str) -> Result<ClaudeSessionView, ClaudeSessio
         match entry.get("type").and_then(Value::as_str) {
             Some("custom-title") => {
                 if let Some(title) = entry
-                    .get("title")
+                    .get("customTitle")
                     .and_then(Value::as_str)
-                    .and_then(display_line)
+                    .and_then(complete_line)
+                    .or_else(|| {
+                        entry
+                            .get("title")
+                            .and_then(Value::as_str)
+                            .and_then(complete_line)
+                    })
                 {
                     custom_title = Some(title);
                 }
@@ -174,7 +180,7 @@ pub fn parse_session_text(input: &str) -> Result<ClaudeSessionView, ClaudeSessio
                 if let Some(title) = entry
                     .get("aiTitle")
                     .and_then(Value::as_str)
-                    .and_then(display_line)
+                    .and_then(complete_line)
                 {
                     ai_title = Some(title);
                 }
@@ -190,13 +196,9 @@ pub fn parse_session_text(input: &str) -> Result<ClaudeSessionView, ClaudeSessio
         &nodes,
         &header.session_identity,
     )?;
-    let mut first_user_line = None;
     let mut latest_user_index = None;
     for (index, node) in chain.iter().enumerate() {
-        if let NodeKind::User(Some(line)) = &node.kind {
-            if first_user_line.is_none() {
-                first_user_line = Some(line.clone());
-            }
+        if matches!(&node.kind, NodeKind::User(Some(_))) {
             latest_user_index = Some(index);
         }
     }
@@ -208,17 +210,13 @@ pub fn parse_session_text(input: &str) -> Result<ClaudeSessionView, ClaudeSessio
             }
         }
     }
-    let session_name = custom_title.or(ai_title).or(first_user_line).or_else(|| {
-        header
-            .cwd
-            .file_name()
-            .and_then(|value| value.to_str())
-            .and_then(display_line)
-    });
+    let tab_name_source = custom_title.or(ai_title);
+    let session_name = tab_name_source.as_deref().and_then(display_line);
     Ok(ClaudeSessionView {
         display: DisplayView {
             session_identity: header.session_identity.clone(),
             session_name,
+            tab_name_source,
             last_message,
         },
         header,
@@ -503,7 +501,7 @@ mod tests {
     }
 
     #[test]
-    fn derives_identity_and_cwd_name_from_first_top_level_message() {
+    fn derives_identity_and_cwd_without_inventing_a_session_title() {
         let view = parse_session_text(concat!(
             "{\"type\":\"user\",\"uuid\":\"00000000-0000-4000-8000-000000000001\",\"parentUuid\":null,",
             "\"sessionId\":\"10000000-0000-4000-8000-000000000001\",\"cwd\":\"/work/project\",",
@@ -516,7 +514,7 @@ mod tests {
             "10000000-0000-4000-8000-000000000001"
         );
         assert_eq!(view.header.cwd, PathBuf::from("/work/project"));
-        assert_eq!(view.display.session_name.as_deref(), Some("project"));
+        assert_eq!(view.display.session_name, None);
         assert_eq!(view.display.last_message, None);
     }
 
@@ -532,12 +530,37 @@ mod tests {
             "\"cwd\":\"/work/project\",\"isSidechain\":false,\"message\":{\"role\":\"assistant\",\"content\":[",
             "{\"type\":\"text\",\"text\":\"Earlier block\"},{\"type\":\"thinking\",\"thinking\":\"private\"},",
             "{\"type\":\"text\",\"text\":\"Latest answer\"}]}}\n",
-            "{\"type\":\"custom-title\",\"title\":\"Explicit name\",\"sessionId\":\"10000000-0000-4000-8000-000000000001\"}\n"
+            "{\"type\":\"custom-title\",\"customTitle\":\"Explicit name\",\"sessionId\":\"10000000-0000-4000-8000-000000000001\"}\n"
         ))
         .unwrap();
 
         assert_eq!(view.display.session_name.as_deref(), Some("Explicit name"));
         assert_eq!(view.display.last_message.as_deref(), Some("Latest answer"));
+    }
+
+    #[test]
+    fn keeps_complete_title_source_separate_from_sidebar_bound() {
+        let title = format!("a{}", "\u{301}".repeat(90));
+        let entries = vec![
+            user(
+                "00000000-0000-4000-8000-000000000001",
+                None,
+                SESSION_ID,
+                json!("Task"),
+            ),
+            json!({"type":"custom-title","customTitle":title,"sessionId":SESSION_ID}),
+        ];
+
+        let view = parse_session_text(&jsonl(&entries)).unwrap();
+
+        assert_eq!(
+            view.display.session_name.as_ref().unwrap().chars().count(),
+            80
+        );
+        assert_eq!(
+            view.display.tab_name_source.as_deref(),
+            Some(title.as_str())
+        );
     }
 
     #[test]
@@ -561,7 +584,7 @@ mod tests {
         ))
         .unwrap();
 
-        assert_eq!(view.display.session_name.as_deref(), Some("Root task"));
+        assert_eq!(view.display.session_name, None);
         assert_eq!(view.header.cwd, PathBuf::from("/work/project"));
         assert_eq!(view.display.last_message.as_deref(), Some("Active answer"));
     }
@@ -586,7 +609,7 @@ mod tests {
 
         let view = parse_session_text(&jsonl(&[sidechain, visible])).unwrap();
 
-        assert_eq!(view.display.session_name.as_deref(), Some("project"));
+        assert_eq!(view.display.session_name, None);
         assert_eq!(view.display.last_message, None);
     }
 
@@ -614,7 +637,7 @@ mod tests {
         ))
         .unwrap();
 
-        assert_eq!(view.display.session_name.as_deref(), Some("Human task"));
+        assert_eq!(view.display.session_name, None);
         assert_eq!(view.display.last_message.as_deref(), Some("Visible answer"));
     }
 
@@ -728,6 +751,28 @@ mod tests {
             parse_session_text(&jsonl(&[valid, mismatched])),
             Err(ClaudeSessionError::IdentityMismatch)
         ));
+    }
+
+    #[test]
+    fn accepts_legacy_custom_title_key() {
+        let entries = vec![
+            user(
+                "00000000-0000-4000-8000-000000000001",
+                None,
+                SESSION_ID,
+                json!("Task"),
+            ),
+            json!({
+                "type":"custom-title",
+                "customTitle":"   ",
+                "title":"Legacy",
+                "sessionId":SESSION_ID
+            }),
+        ];
+
+        let view = parse_session_text(&jsonl(&entries)).unwrap();
+
+        assert_eq!(view.display.session_name.as_deref(), Some("Legacy"));
     }
 
     #[test]

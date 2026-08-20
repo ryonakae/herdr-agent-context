@@ -67,7 +67,7 @@ An official Pi session path or Claude session ID takes priority over local fallb
 
 ### Claude Code
 
-- Name: custom title, latest `ai-title`, first genuine user text on the active branch, then cwd basename.
+- Title: current or legacy custom title, then latest `ai-title`. Until Claude writes one of these records, the session title stays empty; first-user text and cwd are not title fallbacks.
 - Activity: latest top-level assistant text block after the latest genuine user entry.
 - Filtering: thinking, tool calls and results, fallback blocks, sidechains, metadata, and API error text never become activity.
 - Scope: persistent top-level interactive sessions, including continue, resume, named, worktree, and Remote Control sessions that write a local transcript.

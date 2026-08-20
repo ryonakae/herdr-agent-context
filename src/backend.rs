@@ -46,6 +46,7 @@ pub struct PaneInput {
     pub key: PaneKey,
     pub agent: String,
     pub cwd: PathBuf,
+    pub terminal_title: Option<String>,
     pub authoritative_session: Option<SessionReference>,
     pub processes: Vec<ProcessCommand>,
 }
@@ -88,6 +89,7 @@ impl Binding {
 pub struct DisplayView {
     pub session_identity: String,
     pub session_name: Option<String>,
+    pub tab_name_source: Option<String>,
     pub last_message: Option<String>,
 }
 

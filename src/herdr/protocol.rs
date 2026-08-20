@@ -29,6 +29,8 @@ pub struct AgentInfo {
     pub agent_status: String,
     pub cwd: Option<String>,
     pub foreground_cwd: Option<String>,
+    #[serde(default)]
+    pub terminal_title_stripped: Option<String>,
     pub pane_id: String,
     pub revision: u64,
     #[serde(default)]

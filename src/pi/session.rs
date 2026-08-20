@@ -33,9 +33,11 @@ impl PiSessionView {
     }
 
     pub fn display_view(&self) -> DisplayView {
+        let session_name = self.session_name();
         DisplayView {
             session_identity: self.session_id.clone(),
-            session_name: self.session_name(),
+            tab_name_source: session_name.clone(),
+            session_name,
             last_message: self.latest_turn_assistant_line.clone(),
         }
     }

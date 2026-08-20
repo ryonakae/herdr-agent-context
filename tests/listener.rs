@@ -84,6 +84,7 @@ fn agent() -> AgentInfo {
         agent_status: "working".into(),
         cwd: Some("/work/project".into()),
         foreground_cwd: Some("/work/project".into()),
+        terminal_title_stripped: None,
         pane_id: "w1:p1".into(),
         revision: 1,
         state_change_seq: 1,
@@ -98,6 +99,7 @@ fn claude_agent(cwd: &str, pane_id: &str) -> AgentInfo {
         agent_status: "working".into(),
         cwd: Some(cwd.into()),
         foreground_cwd: Some(cwd.into()),
+        terminal_title_stripped: None,
         pane_id: pane_id.into(),
         revision: 1,
         state_change_seq: 1,
@@ -160,7 +162,7 @@ fn claude_session_text(session_id: &str, cwd: &str, title: &str, answer: &str) -
             "\"parentUuid\":\"00000000-0000-4000-8000-000000000001\",\"sessionId\":\"{session_id}\",",
             "\"cwd\":\"{cwd}\",\"isSidechain\":false,\"message\":{{\"role\":\"assistant\",",
             "\"content\":[{{\"type\":\"text\",\"text\":\"{answer}\"}}]}}}}\n",
-            "{{\"type\":\"custom-title\",\"title\":\"{title}\",\"sessionId\":\"{session_id}\"}}\n"
+            "{{\"type\":\"custom-title\",\"customTitle\":\"{title}\",\"sessionId\":\"{session_id}\"}}\n"
         ),
         session_id = session_id,
         cwd = cwd,

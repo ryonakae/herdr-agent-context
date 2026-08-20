@@ -92,6 +92,7 @@ impl Runtime {
                 },
                 agent: agent.agent.clone().unwrap_or_default(),
                 cwd: PathBuf::from(cwd),
+                terminal_title: agent.terminal_title_stripped.clone(),
                 authoritative_session,
                 processes,
             });
