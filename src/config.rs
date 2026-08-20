@@ -179,6 +179,13 @@ impl Config {
     }
 }
 
+pub fn resolve_pi_agent_dir(env: &HashMap<String, String>, home: &Path) -> PathBuf {
+    env.get("PI_CODING_AGENT_DIR")
+        .filter(|value| !value.is_empty())
+        .and_then(|value| normalize_env_path(Path::new(value), home))
+        .unwrap_or_else(|| home.join(".pi/agent"))
+}
+
 pub fn resolve_session_roots(
     env: &HashMap<String, String>,
     home: &Path,
@@ -188,13 +195,7 @@ pub fn resolve_session_roots(
         .get("PI_CODING_AGENT_SESSION_DIR")
         .filter(|value| !value.is_empty())
         .and_then(|value| normalize_env_path(Path::new(value), home))
-        .or_else(|| {
-            env.get("PI_CODING_AGENT_DIR")
-                .filter(|value| !value.is_empty())
-                .and_then(|value| normalize_env_path(Path::new(value), home))
-                .map(|path| path.join("sessions"))
-        })
-        .unwrap_or_else(|| home.join(".pi/agent/sessions"));
+        .unwrap_or_else(|| resolve_pi_agent_dir(env, home).join("sessions"));
     merge_roots(primary, additional)
 }
 
@@ -377,6 +378,10 @@ mod tests {
         let additions = vec![PathBuf::from("/extra"), PathBuf::from("/extra")];
         let mut env = HashMap::new();
         assert_eq!(
+            resolve_pi_agent_dir(&env, home),
+            PathBuf::from("/home/me/.pi/agent")
+        );
+        assert_eq!(
             resolve_session_roots(&env, home, &additions),
             vec![
                 PathBuf::from("/home/me/.pi/agent/sessions"),
@@ -385,6 +390,7 @@ mod tests {
         );
 
         env.insert("PI_CODING_AGENT_DIR".into(), "/agent".into());
+        assert_eq!(resolve_pi_agent_dir(&env, home), PathBuf::from("/agent"));
         assert_eq!(
             resolve_session_roots(&env, home, &[]),
             vec![PathBuf::from("/agent/sessions")]

@@ -54,7 +54,7 @@ herdr integration install claude
 
 These commands are optional and separate from plugin installation. The plugin never installs integrations or edits Pi, Claude, or Herdr settings.
 
-An official Pi session path or Claude session ID takes priority over local fallback. If that reference is missing or malformed, the listener waits for the exact session instead of showing another transcript. The plugin reports visual metadata only; it never writes inferred paths or IDs back to Herdr.
+An official Pi session path or Claude session ID takes priority over local fallback. When the official Pi integration is installed, the listener waits for its session path during startup instead of showing a heuristic match. If an authoritative reference is missing or malformed, the listener waits for the exact session instead of showing another transcript. The plugin reports visual metadata only; it never writes inferred paths or IDs back to Herdr.
 
 ## Context rules
 

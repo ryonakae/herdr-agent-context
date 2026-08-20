@@ -38,6 +38,15 @@ impl Resolver {
         panes: &[PaneInput],
         candidates: &[Candidate],
     ) -> HashMap<PaneKey, Binding> {
+        self.resolve_with_authority_requirement(panes, candidates, false)
+    }
+
+    pub(crate) fn resolve_with_authority_requirement(
+        &mut self,
+        panes: &[PaneInput],
+        candidates: &[Candidate],
+        require_authoritative: bool,
+    ) -> HashMap<PaneKey, Binding> {
         let eligible: Vec<_> = panes
             .iter()
             .filter(|pane| pane.agent.eq_ignore_ascii_case(PI_AGENT))
@@ -64,6 +73,10 @@ impl Resolver {
                 );
                 continue;
             }
+            if require_authoritative {
+                self.bindings.remove(&pane.key);
+                continue;
+            }
 
             let keep = self.bindings.get(&pane.key).is_some_and(|binding| {
                 !binding.is_official()
@@ -83,7 +96,7 @@ impl Resolver {
         for pane in eligible
             .iter()
             .copied()
-            .filter(|pane| authoritative_path_reference(pane).is_none())
+            .filter(|pane| !require_authoritative && authoritative_path_reference(pane).is_none())
         {
             panes_by_cwd
                 .entry(canonical_or_original(&pane.cwd))

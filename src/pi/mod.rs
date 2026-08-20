@@ -2,7 +2,7 @@ pub mod resolver;
 pub mod session;
 
 use crate::backend::{BackendOutcome, DisplayView, PI_AGENT, PaneInput, PaneKey};
-use crate::config::{Config, resolve_session_roots};
+use crate::config::{Config, resolve_pi_agent_dir, resolve_session_roots};
 use resolver::{Resolver, SessionScanner, parse_bound_session};
 use std::collections::HashMap;
 use std::fs;
@@ -45,7 +45,14 @@ impl PiBackend {
     ) -> HashMap<PaneKey, BackendOutcome> {
         let roots = resolve_session_roots(env, home, &config.pi_session_dirs);
         let candidates = self.scanner.scan(&roots);
-        let bindings = self.resolver.resolve(panes, &candidates);
+        let integration_installed = resolve_pi_agent_dir(env, home)
+            .join("extensions/herdr-agent-state.ts")
+            .is_file();
+        let bindings = self.resolver.resolve_with_authority_requirement(
+            panes,
+            &candidates,
+            integration_installed,
+        );
         panes
             .iter()
             .filter(|pane| pane.agent.eq_ignore_ascii_case(PI_AGENT))

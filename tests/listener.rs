@@ -673,6 +673,51 @@ fn runtime_clears_metadata_for_no_session_and_non_pi_panes() {
 }
 
 #[test]
+fn installed_pi_integration_waits_for_agent_session_before_fallback() {
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    fs::create_dir(&sessions).unwrap();
+    let previous = sessions.join("previous.jsonl");
+    fs::write(
+        &previous,
+        session_text(
+            "{\"type\":\"session_info\",\"id\":\"n1\",\"parentId\":\"a1\",\"name\":\"Previous\"}\n",
+        ),
+    )
+    .unwrap();
+    let extension_dir = temp.path().join(".pi/agent/extensions");
+    fs::create_dir_all(&extension_dir).unwrap();
+    fs::write(extension_dir.join("herdr-agent-state.ts"), "integration").unwrap();
+    let mut runtime = Runtime::new(
+        Config {
+            pi_session_dirs: vec![sessions],
+            ..Config::default()
+        },
+        temp.path().to_owned(),
+        HashMap::new(),
+    );
+    let mut api = fake_api();
+
+    runtime.reconcile(&mut api).unwrap();
+    assert!(api.reports.is_empty());
+
+    api.agents[0].agent_session = Some(AgentSessionInfo {
+        source: "herdr:pi".into(),
+        agent: "pi".into(),
+        kind: "path".into(),
+        value: previous.display().to_string(),
+    });
+    runtime.reconcile(&mut api).unwrap();
+
+    assert_eq!(api.reports.len(), 1);
+    assert_eq!(api.reports[0].session_name.as_deref(), Some("Previous"));
+    assert_eq!(
+        api.reports[0].applies_to_source.as_deref(),
+        Some("herdr:pi")
+    );
+}
+
+#[test]
 fn authoritative_path_wins_over_fallback_and_preserves_source() {
     let temp = tempfile::tempdir().unwrap();
     let authoritative = temp.path().join("authoritative.jsonl");
