@@ -9,12 +9,18 @@ pub const DEFAULT_POLL_INTERVAL_MS: u64 = 2_000;
 pub const DEFAULT_METADATA_TTL_MS: u64 = 10_000;
 pub const MAX_METADATA_TTL_MS: u64 = 86_400_000;
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct TabNameConfig {
+    pub enabled: bool,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Config {
     pub poll_interval_ms: u64,
     pub metadata_ttl_ms: u64,
     pub pi_session_dirs: Vec<PathBuf>,
     pub claude_session_dirs: Vec<PathBuf>,
+    pub tab_name: TabNameConfig,
 }
 
 impl Default for Config {
@@ -24,6 +30,7 @@ impl Default for Config {
             metadata_ttl_ms: DEFAULT_METADATA_TTL_MS,
             pi_session_dirs: Vec::new(),
             claude_session_dirs: Vec::new(),
+            tab_name: TabNameConfig::default(),
         }
     }
 }
@@ -35,6 +42,13 @@ struct RawConfig {
     metadata_ttl_ms: Option<u64>,
     pi_session_dirs: Option<Vec<PathBuf>>,
     agents: Option<RawAgents>,
+    tab_name: Option<RawTabNameConfig>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawTabNameConfig {
+    enabled: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -151,6 +165,12 @@ impl Config {
             metadata_ttl_ms: raw.metadata_ttl_ms.unwrap_or(DEFAULT_METADATA_TTL_MS),
             pi_session_dirs,
             claude_session_dirs,
+            tab_name: TabNameConfig {
+                enabled: raw
+                    .tab_name
+                    .and_then(|tab_name| tab_name.enabled)
+                    .unwrap_or(false),
+            },
         };
         config.validate()?;
         Ok(config)
@@ -288,6 +308,31 @@ mod tests {
     }
 
     #[test]
+    fn tab_name_sync_is_strict_and_disabled_by_default() {
+        let home = Path::new("/home/me");
+        assert!(!Config::from_toml("", home).unwrap().tab_name.enabled);
+        assert!(
+            !Config::from_toml("[tab_name]", home)
+                .unwrap()
+                .tab_name
+                .enabled
+        );
+        assert!(
+            Config::from_toml("[tab_name]\nenabled = true", home)
+                .unwrap()
+                .tab_name
+                .enabled
+        );
+        assert!(
+            !Config::from_toml("[tab_name]\nenabled = false", home)
+                .unwrap()
+                .tab_name
+                .enabled
+        );
+        assert!(Config::from_toml("[tab_name]\nwidth = 20", home).is_err());
+    }
+
+    #[test]
     fn rejects_unknown_and_invalid_timing_values() {
         assert!(Config::from_toml("poll_interval_ms = 0", Path::new("/home/me")).is_err());
         assert!(
@@ -365,11 +410,22 @@ mod tests {
         assert!(matches!(watcher.poll(), ConfigReload::Invalid));
         assert!(matches!(watcher.poll(), ConfigReload::Unchanged));
 
-        fs::write(temp.path().join("config.toml"), "poll_interval_ms = 3000").unwrap();
+        fs::write(
+            temp.path().join("config.toml"),
+            "poll_interval_ms = 3000\n[tab_name]\nenabled = true",
+        )
+        .unwrap();
         let ConfigReload::Updated(config) = watcher.poll() else {
             panic!("expected valid reload");
         };
         assert_eq!(config.poll_interval_ms, 3_000);
+        assert!(config.tab_name.enabled);
+
+        fs::remove_file(temp.path().join("config.toml")).unwrap();
+        let ConfigReload::Updated(config) = watcher.poll() else {
+            panic!("expected defaults after config removal");
+        };
+        assert!(!config.tab_name.enabled);
     }
 
     #[test]

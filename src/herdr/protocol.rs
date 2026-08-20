@@ -12,6 +12,13 @@ pub const SUBSCRIPTIONS: &[&str] = &[
     "pane.closed",
     "pane.exited",
     "pane.agent_detected",
+    "pane.focused",
+    "pane.moved",
+    "tab.created",
+    "tab.closed",
+    "tab.renamed",
+    "tab.moved",
+    "layout.updated",
 ];
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -25,6 +32,10 @@ pub struct AgentSessionInfo {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 pub struct AgentInfo {
     pub terminal_id: String,
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+    #[serde(default)]
+    pub tab_id: Option<String>,
     pub agent: Option<String>,
     pub agent_status: String,
     pub cwd: Option<String>,
@@ -76,10 +87,36 @@ pub struct Process {
     pub cmdline: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+pub struct TabInfo {
+    pub tab_id: String,
+    pub workspace_id: String,
+    pub number: usize,
+    pub label: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+pub struct TabLayout {
+    pub workspace_id: String,
+    pub tab_id: String,
+    pub focused_pane_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+pub struct SessionSnapshot {
+    #[serde(default)]
+    pub tabs: Vec<TabInfo>,
+    #[serde(default)]
+    pub layouts: Vec<TabLayout>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PaneEvent {
+pub struct HerdrEvent {
     pub kind: String,
     pub pane_id: Option<String>,
+    pub tab_id: Option<String>,
+    pub workspace_id: Option<String>,
+    pub label: Option<String>,
 }
 
 pub fn request(id: &str, method: &str, params: Value) -> Value {
@@ -97,6 +134,10 @@ pub fn subscription_params() -> Value {
 
 pub fn process_info_params(pane_id: &str) -> Value {
     json!({"pane_id": pane_id})
+}
+
+pub fn tab_rename_params(tab_id: &str, label: &str) -> Value {
+    json!({"tab_id": tab_id, "label": label})
 }
 
 pub fn metadata_params(
@@ -145,7 +186,17 @@ pub fn parse_process_info(result: Value) -> Result<ProcessInfo, serde_json::Erro
     serde_json::from_value(value)
 }
 
-pub fn parse_event(value: &Value) -> Option<PaneEvent> {
+pub fn parse_session_snapshot(result: Value) -> Result<SessionSnapshot, serde_json::Error> {
+    let value = result.get("snapshot").cloned().unwrap_or(result);
+    serde_json::from_value(value)
+}
+
+pub fn parse_tab_info(result: Value) -> Result<TabInfo, serde_json::Error> {
+    let value = result.get("tab").cloned().unwrap_or(result);
+    serde_json::from_value(value)
+}
+
+pub fn parse_event(value: &Value) -> Option<HerdrEvent> {
     let event = value.get("event")?.as_str()?.to_owned();
     let data = value.get("data")?.as_object()?;
     let data_kind = data.get("type").and_then(Value::as_str);
@@ -153,20 +204,22 @@ pub fn parse_event(value: &Value) -> Option<PaneEvent> {
     if data_kind != Some(expected.as_str()) && data_kind != Some(event.as_str()) {
         return None;
     }
-    Some(PaneEvent {
+    Some(HerdrEvent {
         kind: event,
-        pane_id: pane_id(data),
+        pane_id: event_field(data, "pane_id"),
+        tab_id: event_field(data, "tab_id"),
+        workspace_id: event_field(data, "workspace_id"),
+        label: event_field(data, "label"),
     })
 }
 
-fn pane_id(data: &Map<String, Value>) -> Option<String> {
-    data.get("pane_id")
+fn event_field(data: &Map<String, Value>, key: &str) -> Option<String> {
+    data.get(key)
         .and_then(Value::as_str)
         .or_else(|| {
-            data.get("pane")
-                .and_then(Value::as_object)
-                .and_then(|pane| pane.get("pane_id"))
-                .and_then(Value::as_str)
+            ["pane", "tab", "layout"]
+                .iter()
+                .find_map(|object| data.get(*object)?.as_object()?.get(key)?.as_str())
         })
         .map(ToOwned::to_owned)
 }
@@ -178,19 +231,94 @@ mod tests {
     #[test]
     fn subscription_uses_dotted_types_in_subscription_objects() {
         let value = subscription_params();
-        assert_eq!(value["subscriptions"].as_array().unwrap().len(), 5);
-        assert_eq!(value["subscriptions"][0]["type"], "pane.created");
+        let kinds: Vec<_> = value["subscriptions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["type"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                "pane.created",
+                "pane.updated",
+                "pane.closed",
+                "pane.exited",
+                "pane.agent_detected",
+                "pane.focused",
+                "pane.moved",
+                "tab.created",
+                "tab.closed",
+                "tab.renamed",
+                "tab.moved",
+                "layout.updated",
+            ]
+        );
     }
 
     #[test]
     fn event_accepts_snake_case_envelope_from_dotted_subscription() {
         let event = parse_event(&json!({
             "event": "pane_agent_detected",
-            "data": {"type": "pane_agent_detected", "pane_id": "w1:p1", "released": false}
+            "data": {"type": "pane_agent_detected", "pane_id": "w1:p1", "workspace_id": "w1", "released": false}
         }))
         .unwrap();
         assert_eq!(event.kind, "pane_agent_detected");
         assert_eq!(event.pane_id.as_deref(), Some("w1:p1"));
+        assert_eq!(event.workspace_id.as_deref(), Some("w1"));
+
+        let renamed = parse_event(&json!({
+            "event": "tab_renamed",
+            "data": {"type": "tab_renamed", "tab_id": "w1:t1", "workspace_id": "w1", "label": "manual"}
+        }))
+        .unwrap();
+        assert_eq!(renamed.tab_id.as_deref(), Some("w1:t1"));
+        assert_eq!(renamed.label.as_deref(), Some("manual"));
+
+        let moved = parse_event(&json!({
+            "event": "pane_moved",
+            "data": {"type": "pane_moved", "pane": {"pane_id": "w2:p2", "tab_id": "w2:t1", "workspace_id": "w2"}}
+        }))
+        .unwrap();
+        assert_eq!(moved.pane_id.as_deref(), Some("w2:p2"));
+        assert_eq!(moved.tab_id.as_deref(), Some("w2:t1"));
+        assert_eq!(moved.workspace_id.as_deref(), Some("w2"));
+    }
+
+    #[test]
+    fn parses_minimum_session_snapshot_and_tab_rename_contracts() {
+        let snapshot = parse_session_snapshot(json!({
+            "type": "session_snapshot",
+            "snapshot": {
+                "version": "0.8.0",
+                "protocol": 19,
+                "tabs": [
+                    {"tab_id":"w1:t1","workspace_id":"w1","number":7,"label":"one","focused":true,"pane_count":2,"agent_status":"working"},
+                    {"tab_id":"w1:t2","workspace_id":"w1","number":9,"label":"two","focused":false,"pane_count":1,"agent_status":"idle"}
+                ],
+                "layouts": [
+                    {"workspace_id":"w1","tab_id":"w1:t1","focused_pane_id":"w1:p2","future":true},
+                    {"workspace_id":"w1","tab_id":"w1:t2","focused_pane_id":"w1:p3"}
+                ],
+                "workspaces": [], "panes": [], "agents": [], "future": true
+            }
+        }))
+        .unwrap();
+        assert_eq!(snapshot.tabs[0].tab_id, "w1:t1");
+        assert_eq!(snapshot.tabs[0].number, 7);
+        assert_eq!(snapshot.layouts[0].focused_pane_id, "w1:p2");
+        assert_eq!(snapshot.layouts[1].tab_id, "w1:t2");
+
+        assert_eq!(
+            tab_rename_params("w1:t1", "title"),
+            json!({"tab_id":"w1:t1","label":"title"})
+        );
+        let tab = parse_tab_info(json!({
+            "type":"tab_info",
+            "tab":{"tab_id":"w1:t1","workspace_id":"w1","number":7,"label":"title","focused":true,"pane_count":2,"agent_status":"working"}
+        }))
+        .unwrap();
+        assert_eq!(tab.label, "title");
     }
 
     #[test]

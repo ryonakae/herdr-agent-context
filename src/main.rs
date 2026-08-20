@@ -239,7 +239,8 @@ mod tests {
                 "poll_interval_ms = 3000\n",
                 "metadata_ttl_ms = 12000\n",
                 "[agents.pi]\nsession_dirs = [\"/pi\"]\n",
-                "[agents.claude]\nsession_dirs = [\"/claude\"]\n"
+                "[agents.claude]\nsession_dirs = [\"/claude\"]\n",
+                "[tab_name]\nenabled = true\n"
             ),
             Path::new("/home/me"),
         )
@@ -251,6 +252,7 @@ mod tests {
             AppliedConfigReload::Invalid
         );
         assert_eq!(runtime.config(), &config);
+        assert!(runtime.config().tab_name.enabled);
     }
 
     #[test]

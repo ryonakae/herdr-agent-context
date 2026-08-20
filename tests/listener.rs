@@ -1,6 +1,7 @@
 use herdr_agent_context::config::Config;
 use herdr_agent_context::herdr::protocol::{
     AgentInfo, AgentSessionInfo, LAST_MESSAGE_TOKEN, ProcessInfo, SESSION_NAME_TOKEN,
+    SessionSnapshot, TabInfo,
 };
 use herdr_agent_context::herdr::socket::{EventPoll, SocketTransport};
 use herdr_agent_context::herdr::{HerdrApi, MetadataReport};
@@ -59,6 +60,22 @@ impl HerdrApi for FakeApi {
         })
     }
 
+    fn session_snapshot(&mut self) -> Result<SessionSnapshot, Self::Error> {
+        Ok(SessionSnapshot {
+            tabs: Vec::new(),
+            layouts: Vec::new(),
+        })
+    }
+
+    fn rename_tab(&mut self, tab_id: &str, label: &str) -> Result<TabInfo, Self::Error> {
+        Ok(TabInfo {
+            tab_id: tab_id.to_owned(),
+            workspace_id: "w1".into(),
+            number: 1,
+            label: label.to_owned(),
+        })
+    }
+
     fn report_metadata(&mut self, report: MetadataReport<'_>) -> Result<(), Self::Error> {
         if self.fail_next_clear && report.session_name.is_none() && report.last_message.is_none() {
             self.fail_next_clear = false;
@@ -80,6 +97,8 @@ impl HerdrApi for FakeApi {
 fn agent() -> AgentInfo {
     AgentInfo {
         terminal_id: "term-1".into(),
+        workspace_id: Some("w1".into()),
+        tab_id: Some("w1:t1".into()),
         agent: Some("pi".into()),
         agent_status: "working".into(),
         cwd: Some("/work/project".into()),
@@ -95,6 +114,8 @@ fn agent() -> AgentInfo {
 fn claude_agent(cwd: &str, pane_id: &str) -> AgentInfo {
     AgentInfo {
         terminal_id: format!("term-{pane_id}"),
+        workspace_id: Some(pane_id.split(':').next().unwrap_or("w1").into()),
+        tab_id: Some(format!("{}:t1", pane_id.split(':').next().unwrap_or("w1"))),
         agent: Some("claude".into()),
         agent_status: "working".into(),
         cwd: Some(cwd.into()),
@@ -1156,7 +1177,7 @@ fn socket_transport_subscribes_first_buffers_events_and_uses_exact_metadata_cont
                 .as_array()
                 .unwrap()
                 .len(),
-            5
+            12
         );
         server_seen.lock().unwrap().push(subscribe.clone());
         let mut event_writer = event_stream;
@@ -1164,8 +1185,8 @@ fn socket_transport_subscribes_first_buffers_events_and_uses_exact_metadata_cont
             event_writer,
             "{}",
             json!({
-                "event": "pane_created",
-                "data": {"type": "pane_created", "pane": {"pane_id": "w1:p2"}}
+                "event": "tab_renamed",
+                "data": {"type": "tab_renamed", "tab_id": "w1:t1", "workspace_id": "w1", "label": "manual"}
             })
         )
         .unwrap();
@@ -1178,7 +1199,7 @@ fn socket_transport_subscribes_first_buffers_events_and_uses_exact_metadata_cont
         writeln!(event_writer, "not-json").unwrap();
         event_writer.flush().unwrap();
 
-        for _ in 0..3 {
+        for _ in 0..5 {
             let (rpc_stream, _) = listener.accept().unwrap();
             let mut rpc_reader = BufReader::new(rpc_stream.try_clone().unwrap());
             let mut rpc_writer = rpc_stream;
@@ -1192,6 +1213,7 @@ fn socket_transport_subscribes_first_buffers_events_and_uses_exact_metadata_cont
                     "agents": [{
                         "terminal_id": "term-1", "agent": "pi", "agent_status": "working",
                         "cwd": "/work", "foreground_cwd": "/work", "pane_id": "w1:p1",
+                        "workspace_id":"w1", "tab_id":"w1:t1",
                         "revision": 1, "state_change_seq": 2, "future": true
                     }]
                 }),
@@ -1200,6 +1222,19 @@ fn socket_transport_subscribes_first_buffers_events_and_uses_exact_metadata_cont
                     "process_info": {"pane_id": "w1:p1", "foreground_processes": [
                         {"pid": 1, "name": "bash", "argv": null, "argv0": "pi", "cmdline": "pi --no-session"}
                     ]}
+                }),
+                "session.snapshot" => json!({
+                    "type":"session_snapshot",
+                    "snapshot": {
+                        "version":"0.8.0", "protocol":19,
+                        "tabs":[{"tab_id":"w1:t1","workspace_id":"w1","number":1,"label":"1","focused":true,"pane_count":1,"agent_status":"working"}],
+                        "layouts":[{"workspace_id":"w1","tab_id":"w1:t1","focused_pane_id":"w1:p1"}],
+                        "workspaces":[], "panes":[], "agents":[]
+                    }
+                }),
+                "tab.rename" => json!({
+                    "type":"tab_info",
+                    "tab":{"tab_id":"w1:t1","workspace_id":"w1","number":1,"label":"context","focused":true,"pane_count":1,"agent_status":"working"}
                 }),
                 "pane.report_metadata" => json!({"type": "pane_metadata_reported"}),
                 method => panic!("unexpected method {method}"),
@@ -1216,7 +1251,10 @@ fn socket_transport_subscribes_first_buffers_events_and_uses_exact_metadata_cont
 
     let mut transport = SocketTransport::connect(&socket).unwrap();
     match transport.poll_event(Duration::from_secs(1)) {
-        EventPoll::Event(event) => assert_eq!(event.pane_id.as_deref(), Some("w1:p2")),
+        EventPoll::Event(event) => {
+            assert_eq!(event.tab_id.as_deref(), Some("w1:t1"));
+            assert_eq!(event.label.as_deref(), Some("manual"));
+        }
         _ => panic!("expected buffered event"),
     }
     assert!(matches!(
@@ -1225,9 +1263,18 @@ fn socket_transport_subscribes_first_buffers_events_and_uses_exact_metadata_cont
     ));
     let agents = transport.list_agents().unwrap();
     assert_eq!(agents[0].agent.as_deref(), Some("pi"));
+    assert_eq!(agents[0].workspace_id.as_deref(), Some("w1"));
+    assert_eq!(agents[0].tab_id.as_deref(), Some("w1:t1"));
     assert_eq!(
         transport.process_info("w1:p1").unwrap().args(),
         vec!["pi", "pi --no-session"]
+    );
+    let snapshot = transport.session_snapshot().unwrap();
+    assert_eq!(snapshot.tabs[0].tab_id, "w1:t1");
+    assert_eq!(snapshot.layouts[0].focused_pane_id, "w1:p1");
+    assert_eq!(
+        transport.rename_tab("w1:t1", "context").unwrap().label,
+        "context"
     );
     transport
         .report_metadata(MetadataReport {
@@ -1244,6 +1291,19 @@ fn socket_transport_subscribes_first_buffers_events_and_uses_exact_metadata_cont
     server.join().unwrap();
 
     let requests = seen.lock().unwrap();
+    let snapshot = requests
+        .iter()
+        .find(|request| request["method"] == "session.snapshot")
+        .unwrap();
+    assert_eq!(snapshot["params"], json!({}));
+    let rename = requests
+        .iter()
+        .find(|request| request["method"] == "tab.rename")
+        .unwrap();
+    assert_eq!(
+        rename["params"],
+        json!({"tab_id":"w1:t1","label":"context"})
+    );
     let report = requests
         .iter()
         .find(|request| request["method"] == "pane.report_metadata")

@@ -207,7 +207,7 @@ Writes use a same-directory temporary file, owner-only permissions, flush/sync a
 ## Progress
 
 - [x] Task 1: Align Claude's shared sidebar/tab display title and Unicode bounding contracts.
-- [ ] Task 2: Add opt-in configuration and the Herdr topology/rename/event transport contract.
+- [x] Task 2: Add opt-in configuration and the Herdr topology/rename/event transport contract.
 - [ ] Task 3: Implement durable tab ownership, manual overrides, restoration, and crash recovery.
 - [ ] Task 4: Integrate focus-debounced tab synchronization with runtime and listener lifecycle.
 - [ ] Task 5: Publish the user-visible contract and complete automated and disposable-session validation.
@@ -313,6 +313,11 @@ Implementation-time minor file changes or internal naming differences must be re
 - Expected: snapshot, rename, richer event, existing metadata, and process-info protocol tests pass.
 - Run: `cargo test --test listener socket_transport --locked`
 - Expected: subscribe-first buffering and exact metadata/snapshot/rename requests pass on temporary Unix sockets.
+
+**Implementation record:**
+- Added strict default-off `TabNameConfig`, optional agent topology fields, minimal session snapshot/tab/layout values, exact `tab.rename`, missing-tab classification, and typed event context for pane/tab/workspace/label fields.
+- Expanded subscriptions to the agreed 12 event types while preserving subscribe-before-RPC buffering and one socket per request. Existing default-disabled listener tests continue to use only metadata RPCs.
+- Focused config/protocol/socket tests and the full Rust/shell/workflow/release validation set passed. Task-level review found no blocking/high issue; its missing-tab regression-test recommendation was added.
 
 ### Task 3: Durable Ownership and Restoration Policy
 
