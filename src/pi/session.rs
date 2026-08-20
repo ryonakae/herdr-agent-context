@@ -1,5 +1,5 @@
 use crate::backend::DisplayView;
-use crate::text::{display_line, quoted_display_line};
+use crate::text::display_line;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -227,7 +227,7 @@ fn user_message_text(content: &Value) -> Option<String> {
 }
 
 fn assistant_message_text(content: &Value) -> Option<String> {
-    block_text(content, quoted_display_line)
+    block_text(content, display_line)
 }
 
 fn block_text(content: &Value, format: fn(&str) -> Option<String>) -> Option<String> {
@@ -280,7 +280,7 @@ mod tests {
         assert_eq!(view.first_user_line, Some("active task".into()));
         assert_eq!(
             view.latest_turn_assistant_line,
-            Some("\"latest answer\"".into())
+            Some("latest answer".into())
         );
     }
 
@@ -356,6 +356,6 @@ mod tests {
             "{\"type\":\"branch_summary\",\"id\":\"b1\",\"parentId\":\"c2\",\"summary\":\"branch\"}\n",
             "{\"type\":\"message\",\"id\":\"a1\",\"parentId\":\"b1\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"visible\"}]}}\n"
         ));
-        assert_eq!(view.latest_turn_assistant_line, Some("\"visible\"".into()));
+        assert_eq!(view.latest_turn_assistant_line, Some("visible".into()));
     }
 }

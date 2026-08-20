@@ -12,7 +12,7 @@ Claude Code has two useful identity paths: the official Herdr integration report
 
 Release a backward-compatible `v0.2.0` prerelease that:
 
-- displays the same session-name and quoted recent-activity rows for persistent interactive Claude Code panes and Pi panes;
+- displays the same session-name and recent-activity rows for persistent interactive Claude Code panes and Pi panes;
 - prioritizes official Herdr session references for both agents, then uses agent-specific local fallback without writing inferred identity back to Herdr;
 - introduces a small compile-time backend boundary suitable for later Codex and OpenCode implementations without creating a dynamic plugin framework;
 - preserves Pi v0.1.0 behavior, privacy, TTL, reconnect, packaging, and four-target distribution contracts;
@@ -40,7 +40,7 @@ Release a backward-compatible `v0.2.0` prerelease that:
 
 - **R1:** Support local, persistent, top-level interactive Claude Code sessions detected by Herdr, including normal starts, `--continue`, `--resume`, `--name`, worktree sessions, and Remote Control sessions when they produce a local top-level JSONL transcript.
 - **R2:** Explicitly exclude Claude `--print`, `--background`, and `--no-session-persistence` processes from hook-free binding so a historical transcript cannot appear current.
-- **R3:** Report Claude context using the existing `agent_context_session_name` and `agent_context_last_message` metadata tokens, with one-line values limited to 80 Unicode scalars and activity enclosed in ASCII double quotes.
+- **R3:** Report Claude context using the existing `agent_context_session_name` and `agent_context_last_message` metadata tokens, with unquoted one-line values limited to 80 Unicode scalars.
 - **R4:** Resolve the Claude session name as explicit custom title, then latest Claude `ai-title`, then first genuine human user text on the active branch, then canonical cwd basename.
 - **R5:** Resolve recent activity as the latest top-level assistant text block after the latest genuine human user entry on the active branch; exclude thinking, tool calls/results, sidechains/subagents, metadata/system records, and `isApiErrorMessage` entries. Retain the previous activity for the same session until a replacement text appears.
 - **R6:** Reconstruct the active Claude branch from `uuid` and `parentUuid`. Select the last parseable eligible top-level `user` or `assistant` record in physical JSONL order as the active leaf, then follow its ancestors; records on other leaves must not supply fallback user text or activity. Session-level title records may remain outside the message chain but must match the session ID.
@@ -80,7 +80,7 @@ Release a backward-compatible `v0.2.0` prerelease that:
 | `agent_context_last_message` | latest active-turn assistant text | latest top-level active-turn assistant text |
 
 - Both values are one line and at most 80 Unicode scalars.
-- Activity includes leading and trailing ASCII `"`; truncation reserves both quotes and the ellipsis.
+- Activity is unquoted; truncation reserves one scalar for the ellipsis.
 - `pane.report_metadata.params.agent` is the selected backend's canonical Herdr label: `pi` for Pi and `claude` for Claude. Tests assert the complete payload so Claude tokens cannot be routed to Pi rows.
 - Missing activity reports a nullable token. A new user entry does not clear the retained activity for the same bound session.
 - A changed binding never carries activity from the previous session.
@@ -298,9 +298,9 @@ Implementation-time minor file changes or internal naming differences must be re
 **Test cases:**
 - `custom-title`, then `ai-title`, then active first human user text, then cwd basename → exact name priority.
 - Rewind fixture where branch A records appear first and the final persisted eligible record is branch B's leaf → branch B ancestry supplies user/activity text and branch A is ignored, regardless of record timestamps; trailing non-message metadata does not change the selected leaf.
-- Latest human user followed by thinking/tool-use/tool-result/sidechain/API error and then top-level text → only the final eligible text appears, quoted.
+- Latest human user followed by thinking/tool-use/tool-result/sidechain/API error and then top-level text → only the final eligible text appears, unquoted.
 - New human user without assistant text → parser returns no replacement activity so runtime can retain the prior same-session value.
-- Multiline, whitespace-only, embedded quote, 78/79+ Unicode scalar activity → one line, balanced ASCII quotes, exact 80-scalar cap including ellipsis.
+- Multiline, whitespace-only, embedded quote, and 80/81+ Unicode scalar activity → one unquoted line with an exact 80-scalar cap including ellipsis.
 - Direct child versus nested subagent JSONL → only direct child is discovered.
 - Relevant cwd encoding collision → candidate header cwd validation prevents cross-project binding.
 - 26 recent candidates plus one old authoritative/UUID candidate → ordinary list caps at 25 while direct identity bypasses limits.
@@ -362,7 +362,7 @@ Implementation-time minor file changes or internal naming differences must be re
 - More than 25 recent files with malformed/cwd-incompatible entries ahead of valid entries → invalid entries do not consume the 25-compatible-candidate quota.
 - Existing sticky multiple-pane bindings → no reshuffle when another file changes; listener restart without authority → no disk restoration.
 - One malformed Claude pane plus healthy Claude and Pi panes → healthy panes refresh while failed pane expires.
-- New human Claude message without replacement text → prior quoted activity remains; changed Claude session → prior activity is not inherited.
+- New human Claude message without replacement text → prior activity remains; changed Claude session → prior activity is not inherited.
 - Claude process changes to excluded headless/background mode, non-Claude agent, or new terminal identity → owned tokens clear/retry according to existing rules.
 - Event burst, reconnect, sequence epoch, duplicate listener → existing absolute deadline and transport behavior remain valid with mixed agents.
 
@@ -400,7 +400,7 @@ Implementation-time minor file changes or internal naming differences must be re
 **Implementation notes:**
 - Show one shared `[ui.sidebar.agents]` `rows` example so every supported backend uses the same token rows without per-agent duplication.
 - Keep one-command plugin installation first. Explain that official integrations are optional and separately user-controlled; include exact `herdr integration install pi` and `herdr integration install claude` commands in an accuracy/native-resume section, not as automatic setup.
-- Document name precedence, quoted activity, persistent interactive scope, same-project multi-pane conservative behavior, 30-day/25-candidate fallback limits with direct-identity bypass, `CLAUDE_CONFIG_DIR`, tested Claude version, and TTL failure behavior.
+- Document name precedence, unquoted activity, persistent interactive scope, same-project multi-pane conservative behavior, 30-day/25-candidate fallback limits with direct-identity bypass, `CLAUDE_CONFIG_DIR`, tested Claude version, and TTL failure behavior.
 - Document structured config as preferred and legacy `pi_session_dirs` as accepted but mutually exclusive with `[agents.pi]`.
 - State that the listener reads matching local transcripts and process metadata but never logs title/message text or sends runtime network requests.
 - Synchronize package/plugin version to `0.2.0`; keep plugin ID, metadata token names, Herdr minimum, archive filenames/content, target matrix, and glibc baseline unchanged.
@@ -740,7 +740,7 @@ Implementation-time minor file changes or internal naming differences must be re
 
 **Test cases:**
 - Hook-free live Pi and Claude panes → correct shared rows; no agent settings changed.
-- Claude explicit custom name/AI title/user/cwd fallbacks and quoted activity → match R4/R5 within one poll interval.
+- Claude explicit custom name/AI title/user/cwd fallbacks and unquoted activity → match R4/R5 within one poll interval.
 - Claude rewind, tool-only, sidechain, API error, new user without answer → match branch/filter/retention contracts.
 - Two same-project Claude panes without integration on cold start → unsupported panes remain empty; adding official integration or exact UUID yields deterministic binding.
 - Stop/restart listener and disconnect/reconnect disposable socket → TTL expiry/full sync/sequence behavior matches automated tests.

@@ -1,5 +1,5 @@
 use crate::backend::DisplayView;
-use crate::text::{display_line, quoted_display_line};
+use crate::text::display_line;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -394,7 +394,7 @@ fn assistant_text(entry: &Value, message: &serde_json::Map<String, Value>) -> Op
                 block
                     .get("text")
                     .and_then(Value::as_str)
-                    .and_then(quoted_display_line)
+                    .and_then(display_line)
             })
             .flatten()
     })
@@ -537,10 +537,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(view.display.session_name.as_deref(), Some("Explicit name"));
-        assert_eq!(
-            view.display.last_message.as_deref(),
-            Some("\"Latest answer\"")
-        );
+        assert_eq!(view.display.last_message.as_deref(), Some("Latest answer"));
     }
 
     #[test]
@@ -566,10 +563,7 @@ mod tests {
 
         assert_eq!(view.display.session_name.as_deref(), Some("Root task"));
         assert_eq!(view.header.cwd, PathBuf::from("/work/project"));
-        assert_eq!(
-            view.display.last_message.as_deref(),
-            Some("\"Active answer\"")
-        );
+        assert_eq!(view.display.last_message.as_deref(), Some("Active answer"));
     }
 
     #[test]
@@ -621,10 +615,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(view.display.session_name.as_deref(), Some("Human task"));
-        assert_eq!(
-            view.display.last_message.as_deref(),
-            Some("\"Visible answer\"")
-        );
+        assert_eq!(view.display.last_message.as_deref(), Some("Visible answer"));
     }
 
     #[test]
@@ -772,6 +763,6 @@ mod tests {
         ))
         .unwrap();
 
-        assert_eq!(view.display.last_message.as_deref(), Some("\"Answer\""));
+        assert_eq!(view.display.last_message.as_deref(), Some("Answer"));
     }
 }

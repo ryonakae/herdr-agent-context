@@ -34,6 +34,9 @@ mod tests {
 
     #[test]
     fn truncates_unicode_to_eighty_scalars_including_ellipsis() {
+        let exact = "界".repeat(80);
+        assert_eq!(display_line(&exact), Some(exact));
+
         let value = "界".repeat(81);
         let output = display_line(&value).unwrap();
         assert_eq!(output.chars().count(), 80);

@@ -126,6 +126,30 @@ fn session_text(last_entry: &str) -> String {
     )
 }
 
+fn pi_session_text(cwd: &str, task: &str, answer: &str) -> String {
+    [
+        json!({"type": "session", "id": "s1", "cwd": cwd}),
+        json!({
+            "type": "message",
+            "id": "u1",
+            "parentId": null,
+            "message": {"role": "user", "content": task}
+        }),
+        json!({
+            "type": "message",
+            "id": "a1",
+            "parentId": "u1",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": answer}]
+            }
+        }),
+    ]
+    .into_iter()
+    .map(|entry| format!("{entry}\n"))
+    .collect()
+}
+
 fn claude_session_text(session_id: &str, cwd: &str, title: &str, answer: &str) -> String {
     format!(
         concat!(
@@ -366,10 +390,7 @@ fn claude_retains_activity_within_a_session_but_not_after_switching() {
         HashMap::new(),
     );
     runtime.reconcile(&mut api).unwrap();
-    assert_eq!(
-        api.reports[0].last_message.as_deref(),
-        Some("\"Old answer\"")
-    );
+    assert_eq!(api.reports[0].last_message.as_deref(), Some("Old answer"));
 
     let mut updated = claude_session_text(first_id, "/work/claude", "First", "Old answer");
     updated.push_str(concat!(
@@ -386,10 +407,7 @@ fn claude_retains_activity_within_a_session_but_not_after_switching() {
         .set_modified(old_time)
         .unwrap();
     runtime.reconcile(&mut api).unwrap();
-    assert_eq!(
-        api.reports[1].last_message.as_deref(),
-        Some("\"Old answer\"")
-    );
+    assert_eq!(api.reports[1].last_message.as_deref(), Some("Old answer"));
 
     let second_id = "10000000-0000-4000-8000-000000000002";
     let second = project.join(format!("{second_id}.jsonl"));
@@ -510,6 +528,7 @@ fn runtime_reports_pi_and_claude_with_backend_specific_agent_labels() {
         .unwrap();
     assert_eq!(pi.pane_id, "w1:p1");
     assert_eq!(pi.session_name.as_deref(), Some("Build context"));
+    assert_eq!(pi.last_message.as_deref(), Some("Initial answer"));
     let claude = api
         .reports
         .iter()
@@ -517,7 +536,89 @@ fn runtime_reports_pi_and_claude_with_backend_specific_agent_labels() {
         .unwrap();
     assert_eq!(claude.pane_id, "w1:p2");
     assert_eq!(claude.session_name.as_deref(), Some("Claude name"));
-    assert_eq!(claude.last_message.as_deref(), Some("\"Claude answer\""));
+    assert_eq!(claude.last_message.as_deref(), Some("Claude answer"));
+}
+
+#[test]
+fn runtime_reports_unquoted_eighty_scalar_boundaries_for_pi_and_claude() {
+    let temp = tempfile::tempdir().unwrap();
+    let pi_root = temp.path().join("pi");
+    let claude_root = temp.path().join("claude");
+    let claude_project = claude_root.join("-work-claude");
+    fs::create_dir_all(&pi_root).unwrap();
+    fs::create_dir_all(&claude_project).unwrap();
+    let pi_session = pi_root.join("session.jsonl");
+    let claude_id = "10000000-0000-4000-8000-000000000001";
+    let claude_session = claude_project.join(format!("{claude_id}.jsonl"));
+    let exact_name = "名".repeat(80);
+    let exact_message = "答".repeat(80);
+    fs::write(
+        &pi_session,
+        pi_session_text("/work/project", &exact_name, &exact_message),
+    )
+    .unwrap();
+    fs::write(
+        &claude_session,
+        claude_session_text(claude_id, "/work/claude", &exact_name, &exact_message),
+    )
+    .unwrap();
+    let mut runtime = Runtime::new(
+        Config {
+            pi_session_dirs: vec![pi_root],
+            claude_session_dirs: vec![claude_root],
+            ..Config::default()
+        },
+        PathBuf::from("/no-home"),
+        HashMap::new(),
+    );
+    let mut api = fake_api();
+    api.agents.push(claude_agent("/work/claude", "w1:p2"));
+    api.process_args
+        .insert("w1:p2".into(), vec!["claude".into()]);
+
+    runtime.reconcile(&mut api).unwrap();
+    for agent in ["pi", "claude"] {
+        let report = api
+            .reports
+            .iter()
+            .find(|report| report.agent == agent)
+            .unwrap();
+        assert_eq!(report.session_name.as_deref(), Some(exact_name.as_str()));
+        assert_eq!(report.last_message.as_deref(), Some(exact_message.as_str()));
+    }
+
+    let over_name = "名".repeat(81);
+    let over_message = "答".repeat(81);
+    fs::write(
+        &pi_session,
+        pi_session_text("/work/project", &over_name, &over_message),
+    )
+    .unwrap();
+    fs::write(
+        &claude_session,
+        claude_session_text(claude_id, "/work/claude", &over_name, &over_message),
+    )
+    .unwrap();
+    runtime.reconcile(&mut api).unwrap();
+
+    let truncated_name = format!("{}…", "名".repeat(79));
+    let truncated_message = format!("{}…", "答".repeat(79));
+    for agent in ["pi", "claude"] {
+        let report = api
+            .reports
+            .iter()
+            .rev()
+            .find(|report| report.agent == agent)
+            .unwrap();
+        assert_eq!(
+            report.session_name.as_deref(),
+            Some(truncated_name.as_str())
+        );
+        assert_eq!(
+            report.last_message.as_deref(),
+            Some(truncated_message.as_str())
+        );
+    }
 }
 
 #[test]
@@ -543,7 +644,7 @@ fn runtime_refreshes_ttl_and_retains_activity_until_replacement() {
     );
     assert_eq!(
         api.reports[0].last_message.as_deref(),
-        Some("\"Initial answer\"")
+        Some("Initial answer")
     );
     assert_eq!(api.reports[0].ttl_ms, 10_000);
 
@@ -562,7 +663,7 @@ fn runtime_refreshes_ttl_and_retains_activity_until_replacement() {
     assert_eq!(api.reports[1].session_name.as_deref(), Some("Renamed"));
     assert_eq!(
         api.reports[1].last_message.as_deref(),
-        Some("\"Initial answer\"")
+        Some("Initial answer")
     );
     assert!(api.reports[1].seq > api.reports[0].seq);
 
@@ -570,7 +671,7 @@ fn runtime_refreshes_ttl_and_retains_activity_until_replacement() {
     assert_eq!(api.reports.len(), 3);
     assert_eq!(
         api.reports[2].last_message.as_deref(),
-        Some("\"Initial answer\"")
+        Some("Initial answer")
     );
 }
 
@@ -599,7 +700,7 @@ fn runtime_does_not_refresh_ttl_after_parse_failure_and_recovers() {
     assert_eq!(api.reports.len(), 2);
     assert_eq!(
         api.reports[1].last_message.as_deref(),
-        Some("\"Recovered answer\"")
+        Some("Recovered answer")
     );
 }
 

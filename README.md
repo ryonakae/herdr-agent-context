@@ -34,14 +34,14 @@ Configure context rows once for all Herdr agents in your `config.toml`:
 ```toml
 [ui.sidebar.agents]
 rows = [
-  ["state_icon", "workspace", "tab"],
+  ["state_icon", { token = "agent", bold = true, dim = false }],
+  [{ token = "workspace", bold = false, dim = true }, "tab", "pane"],
   ["$agent_context_session_name"],
   ["$agent_context_last_message"],
-  ["agent"],
 ]
 ```
 
-Restart Herdr or reload its configuration. Each supported pane shows a session name followed by recent assistant activity in ASCII double quotes.
+Restart Herdr or reload its configuration. Each supported pane shows its agent, location, session name, and recent assistant activity.
 
 ## Exact session binding
 
@@ -73,7 +73,7 @@ An official Pi session path or Claude session ID takes priority over local fallb
 - Scope: persistent top-level interactive sessions, including continue, resume, named, worktree, and Remote Control sessions that write a local transcript.
 - Exclusions: `--print`, `--background`, and `--no-session-persistence` do not use local fallback.
 
-Both values use one line and at most 80 Unicode scalars. The activity limit includes the quotes and any ellipsis. A new user entry retains the prior activity for the same session until Claude writes replacement text. Metadata expires after the configured TTL (10 seconds by default) when the listener cannot refresh a bound transcript.
+Both values use one line and at most 80 Unicode scalars. The activity limit includes any ellipsis. A new user entry retains the prior activity for the same session until Claude writes replacement text. Metadata expires after the configured TTL (10 seconds by default) when the listener cannot refresh a bound transcript.
 
 Claude Code support is best effort for the current 2.1.x JSONL structure and was verified with 2.1.220. Unknown records are ignored when safe; broken required structure fails closed for that pane.
 

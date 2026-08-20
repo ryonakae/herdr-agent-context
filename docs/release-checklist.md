@@ -106,7 +106,7 @@ herdr agent prompt context_claude "Reply with a short synthetic Claude status." 
 
 - [ ] An unnamed session uses the first user text, then cwd basename, as the name fallback.
 - [ ] An explicit Pi session name replaces the fallback within one poll interval.
-- [ ] The latest assistant text appears in ASCII double quotes.
+- [ ] The latest assistant text appears without added surrounding quotes.
 - [ ] A new user entry retains prior activity until the next assistant text arrives.
 - [ ] `/new` and `/resume` update a single-pane sticky binding without showing another cwd's transcript.
 - [ ] Two same-cwd Pi panes keep established bindings stable.
@@ -115,7 +115,7 @@ herdr agent prompt context_claude "Reply with a short synthetic Claude status." 
 ### Claude Code
 
 - [ ] Custom title, latest `ai-title`, first active-branch human text, and cwd basename follow the documented name precedence.
-- [ ] The latest top-level assistant text after the latest human entry appears in ASCII double quotes.
+- [ ] The latest top-level assistant text after the latest human entry appears without added surrounding quotes.
 - [ ] Thinking, tool activity, tool results, sidechains, API errors, and abandoned branches never appear.
 - [ ] A new human entry retains prior activity; switching to another session does not carry it across.
 - [ ] `--session-id <uuid>` or UUID `--resume` binds the exact local file without claiming an official source.
@@ -127,7 +127,7 @@ herdr agent prompt context_claude "Reply with a short synthetic Claude status." 
 
 ### Shared behavior
 
-- [ ] Multiline and over-80-scalar values stay on one row and truncate with balanced activity quotes.
+- [ ] Multiline values stay on one row; exactly 80 scalars remain unchanged and longer values truncate to 79 scalars plus an ellipsis.
 - [ ] Stopping the listener lets metadata expire after TTL; restart performs a full sync.
 - [ ] Replacing a pane terminal identity clears the prior terminal's owned metadata.
 - [ ] Socket disconnect/reconnect performs a new full sync with a fresh sequence epoch.

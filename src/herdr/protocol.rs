@@ -200,7 +200,7 @@ mod tests {
             8,
             10_000,
             Some("name"),
-            Some("\"activity\""),
+            Some("activity"),
         );
         assert_eq!(
             value,
@@ -211,7 +211,7 @@ mod tests {
                 "applies_to_source": "herdr:claude",
                 "tokens": {
                     (SESSION_NAME_TOKEN): "name",
-                    (LAST_MESSAGE_TOKEN): "\"activity\""
+                    (LAST_MESSAGE_TOKEN): "activity"
                 },
                 "seq": 8,
                 "ttl_ms": 10_000
