@@ -133,8 +133,18 @@ fn listen_forever(
                 EventPoll::Event(event)
                     if event.kind == "pane_focused" || event.kind == "pane.focused" =>
                 {
-                    runtime.note_focus(event.pane_id.as_deref(), Instant::now());
+                    runtime.note_focus(
+                        event.pane_id.as_deref(),
+                        event.workspace_id.as_deref(),
+                        Instant::now(),
+                    );
                     false
+                }
+                EventPoll::Event(event)
+                    if event.kind == "tab_renamed" || event.kind == "tab.renamed" =>
+                {
+                    runtime.note_tab_rename(event.tab_id.as_deref(), event.label.as_deref());
+                    runtime.tab_event_reconcile_needed()
                 }
                 EventPoll::Event(event) => {
                     event_requires_reconcile(&event.kind, runtime.tab_event_reconcile_needed())

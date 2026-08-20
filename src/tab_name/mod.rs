@@ -26,6 +26,11 @@ pub struct PaneSnapshot {
     pub context: PaneContext,
 }
 
+pub struct TabRenameObservation {
+    pub tab_id: String,
+    pub label: String,
+}
+
 pub enum PaneContext {
     Unsupported,
     Supported {
@@ -107,8 +112,67 @@ impl TabNameManager {
         self.focus_deadlines.values().copied().min()
     }
 
+    pub fn defer_due_focus(&mut self, now: Instant) {
+        for deadline in self.focus_deadlines.values_mut() {
+            if *deadline <= now {
+                *deadline = now + FOCUS_DEBOUNCE;
+            }
+        }
+    }
+
     pub fn needs_snapshot(&self, enabled: bool) -> bool {
         enabled || self.document.cleanup_pending || !self.document.tabs.is_empty()
+    }
+
+    pub fn observe_renames(
+        &mut self,
+        observations: &[TabRenameObservation],
+        tabs: &[TabSnapshot],
+        panes: &[PaneSnapshot],
+    ) -> Result<(), TabNameError> {
+        let before = self.document.clone();
+        let tabs_by_id: HashMap<_, _> = tabs.iter().map(|tab| (tab.tab_id.as_str(), tab)).collect();
+        for observation in observations {
+            let Some(tab) = tabs_by_id.get(observation.tab_id.as_str()) else {
+                continue;
+            };
+            let Some(tab_state) = self.document.tabs.get_mut(&observation.tab_id) else {
+                continue;
+            };
+            let observed_digest = digest_label(&observation.label);
+            let pending_target = tab_state
+                .pending
+                .as_ref()
+                .map(|pending| pending.target_digest.as_str());
+            let applied_target = tab_state
+                .applied
+                .as_ref()
+                .map(|applied| applied.target_digest.as_str());
+            if tab_state.stale_target_digest.as_deref() == Some(observed_digest.as_str()) {
+                tab_state.stale_target_digest = None;
+                continue;
+            }
+            if pending_target == Some(observed_digest.as_str())
+                || applied_target == Some(observed_digest.as_str())
+            {
+                continue;
+            }
+
+            let stale_target_digest = tab_state
+                .stale_target_digest
+                .clone()
+                .or_else(|| pending_target.map(ToOwned::to_owned))
+                .or_else(|| applied_target.map(ToOwned::to_owned));
+            record_manual_label(tab_state, tab, panes, &observation.label);
+            tab_state.stale_target_digest = stale_target_digest;
+        }
+        if self.document != before {
+            if let Err(error) = self.persist_document() {
+                self.document = before;
+                return Err(error);
+            }
+        }
+        Ok(())
     }
 
     pub fn reconcile(
@@ -147,10 +211,38 @@ impl TabNameManager {
                 self.focus_deadlines.remove(&tab.tab_id);
             }
 
-            if let Some(tab_state) = self.document.tabs.get_mut(&tab.tab_id) {
-                if recover_observation(tab_state, tab, panes) == Observation::Released {
-                    release_tabs.push(tab.tab_id.clone());
-                    continue;
+            let observation = self
+                .document
+                .tabs
+                .get_mut(&tab.tab_id)
+                .map_or(Observation::Retained, |tab_state| {
+                    recover_observation(tab_state, tab, panes)
+                });
+            if observation == Observation::Released {
+                release_tabs.push(tab.tab_id.clone());
+                continue;
+            }
+            if observation == Observation::PendingPrior {
+                let tab_state = self.document.tabs.get_mut(&tab.tab_id).unwrap();
+                if !acquiring {
+                    tab_state.pending = None;
+                } else {
+                    let pending = tab_state.pending.clone().unwrap();
+                    if let Some(target) = pending_target_label(tab_state, tab, panes, &pending) {
+                        plan_target(
+                            &tab.tab_id,
+                            &tab.observed_label,
+                            target,
+                            pending.disposition,
+                            tab_state,
+                            &mut effects,
+                        );
+                        continue;
+                    }
+                    if pending_generated_identity_is_live(&pending, tab, panes) {
+                        continue;
+                    }
+                    tab_state.pending = None;
                 }
             }
 
@@ -158,7 +250,9 @@ impl TabNameManager {
                 let Some(tab_state) = self.document.tabs.get_mut(&tab.tab_id) else {
                     continue;
                 };
-                if observed_is_manual(tab_state, &tab.observed_label) {
+                if observation != Observation::StaleTarget
+                    && observed_is_manual(tab_state, &tab.observed_label)
+                {
                     record_manual(tab_state, tab, panes);
                     release_tabs.push(tab.tab_id.clone());
                     continue;
@@ -202,6 +296,8 @@ impl TabNameManager {
                         source: AppliedSource::Baseline,
                     }),
                     pending: None,
+                    stale_target_digest: None,
+                    release_confirmed: false,
                 };
                 self.document.tabs.insert(tab.tab_id.clone(), state);
                 let tab_state = self.document.tabs.get_mut(&tab.tab_id).unwrap();
@@ -351,7 +447,13 @@ impl TabNameManager {
                     tab_state.pending = None;
                 }
                 PendingDisposition::Release => {
-                    self.document.tabs.remove(&token.tab_id);
+                    tab_state.applied = Some(Applied {
+                        target_digest: pending.target_digest,
+                        source: AppliedSource::Baseline,
+                    });
+                    tab_state.pending = None;
+                    tab_state.selection = None;
+                    tab_state.release_confirmed = true;
                 }
             },
         }
@@ -379,6 +481,8 @@ impl TabNameManager {
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum Observation {
     Retained,
+    StaleTarget,
+    PendingPrior,
     Released,
 }
 
@@ -388,6 +492,9 @@ fn recover_observation(
     panes: &[PaneSnapshot],
 ) -> Observation {
     let observed_digest = digest_label(&tab.observed_label);
+    if tab_state.stale_target_digest.as_deref() == Some(observed_digest.as_str()) {
+        return Observation::StaleTarget;
+    }
     if let Some(pending) = tab_state.pending.clone() {
         if observed_digest == pending.target_digest {
             match pending.disposition {
@@ -403,8 +510,7 @@ fn recover_observation(
             }
         }
         if observed_digest == pending.prior_digest {
-            tab_state.pending = None;
-            return Observation::Retained;
+            return Observation::PendingPrior;
         }
         record_manual(tab_state, tab, panes);
         return Observation::Retained;
@@ -415,6 +521,54 @@ fn recover_observation(
     Observation::Retained
 }
 
+fn pending_generated_identity_is_live(
+    pending: &PendingTransition,
+    tab: &TabSnapshot,
+    panes: &[PaneSnapshot],
+) -> bool {
+    let PendingDisposition::Keep {
+        source: AppliedSource::Generated { identity_digest },
+    } = &pending.disposition
+    else {
+        return false;
+    };
+    panes.iter().any(|pane| {
+        pane.tab_id == tab.tab_id
+            && context_digest(pane, &tab.tab_id).as_deref() == Some(identity_digest.as_str())
+    })
+}
+
+fn pending_target_label(
+    tab_state: &TabState,
+    tab: &TabSnapshot,
+    panes: &[PaneSnapshot],
+    pending: &PendingTransition,
+) -> Option<String> {
+    match &pending.disposition {
+        PendingDisposition::Release
+        | PendingDisposition::Keep {
+            source: AppliedSource::Baseline,
+        } => Some(baseline_label(&tab_state.baseline, tab.position)),
+        PendingDisposition::Keep {
+            source: AppliedSource::Override { identity_digest },
+        } => tab_state.overrides.get(identity_digest).cloned(),
+        PendingDisposition::Keep {
+            source: AppliedSource::Generated { identity_digest },
+        } => panes.iter().find_map(|pane| {
+            (pane.tab_id == tab.tab_id
+                && context_digest(pane, &tab.tab_id).as_deref() == Some(identity_digest.as_str()))
+            .then(|| match &pane.context {
+                PaneContext::Supported {
+                    display: DisplayState::Resolved(title),
+                    ..
+                } => tab_label(title),
+                PaneContext::Supported { .. } | PaneContext::Unsupported => None,
+            })
+            .flatten()
+        }),
+    }
+}
+
 fn observed_is_manual(tab_state: &TabState, label: &str) -> bool {
     tab_state
         .applied
@@ -423,6 +577,15 @@ fn observed_is_manual(tab_state: &TabState, label: &str) -> bool {
 }
 
 fn record_manual(tab_state: &mut TabState, tab: &TabSnapshot, panes: &[PaneSnapshot]) {
+    record_manual_label(tab_state, tab, panes, &tab.observed_label);
+}
+
+fn record_manual_label(
+    tab_state: &mut TabState,
+    tab: &TabSnapshot,
+    panes: &[PaneSnapshot],
+    label: &str,
+) {
     let focused_selection = panes
         .iter()
         .find(|pane| pane.pane_id == tab.focused_pane_id)
@@ -439,17 +602,17 @@ fn record_manual(tab_state: &mut TabState, tab: &TabSnapshot, panes: &[PaneSnaps
             .filter(|_| selection_is_live(tab_state, &tab.tab_id, panes))
     });
     tab_state.baseline = Baseline::Exact {
-        value: tab.observed_label.clone(),
+        value: label.to_owned(),
     };
     tab_state.pending = None;
+    tab_state.release_confirmed = false;
     if let Some(selection) = attributed_selection {
         tab_state.selection = Some(selection.clone());
-        tab_state.overrides.insert(
-            selection.identity_digest.clone(),
-            tab.observed_label.clone(),
-        );
+        tab_state
+            .overrides
+            .insert(selection.identity_digest.clone(), label.to_owned());
         tab_state.applied = Some(Applied {
-            target_digest: digest_label(&tab.observed_label),
+            target_digest: digest_label(label),
             source: AppliedSource::Override {
                 identity_digest: selection.identity_digest,
             },
@@ -457,7 +620,7 @@ fn record_manual(tab_state: &mut TabState, tab: &TabSnapshot, panes: &[PaneSnaps
     } else {
         tab_state.selection = None;
         tab_state.applied = Some(Applied {
-            target_digest: digest_label(&tab.observed_label),
+            target_digest: digest_label(label),
             source: AppliedSource::Baseline,
         });
     }
@@ -580,6 +743,7 @@ fn plan_target(
         }
         return;
     }
+    tab_state.release_confirmed = false;
     tab_state.pending = Some(PendingTransition {
         prior_digest,
         target_digest: target_digest.clone(),
@@ -649,6 +813,104 @@ mod tests {
             .complete_rename(effect.token(), RenameCompletion::MissingTab)
             .unwrap();
         assert!(!manager.needs_snapshot(false));
+    }
+
+    #[test]
+    fn disable_release_ack_keeps_state_for_queued_manual_event() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut manager =
+            TabNameManager::load(temp.path(), Path::new("/tmp/herdr-release-ack.sock")).unwrap();
+        let now = Instant::now();
+        let panes = [resolved("w1:p1", "w1:t1", "session-a", "Generated")];
+        let initial = manager
+            .reconcile(true, &[tab("w1:t1", 1, "baseline", "w1:p1")], &panes, now)
+            .unwrap();
+        complete(&mut manager, &initial[0]);
+        let cleanup = manager
+            .reconcile(false, &[tab("w1:t1", 1, "Generated", "w1:p1")], &panes, now)
+            .unwrap();
+        complete(&mut manager, &cleanup[0]);
+
+        let plugin_snapshot = [tab("w1:t1", 1, "baseline", "w1:p1")];
+        manager
+            .observe_renames(
+                &[TabRenameObservation {
+                    tab_id: "w1:t1".into(),
+                    label: "manual-after-ack".into(),
+                }],
+                &plugin_snapshot,
+                &panes,
+            )
+            .unwrap();
+        let restored = manager
+            .reconcile(false, &plugin_snapshot, &panes, now)
+            .unwrap();
+
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].label(), "manual-after-ack");
+    }
+
+    #[test]
+    fn disable_cleanup_restores_manual_event_over_stale_plugin_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut manager =
+            TabNameManager::load(temp.path(), Path::new("/tmp/herdr-event-disable.sock")).unwrap();
+        let now = Instant::now();
+        let panes = [resolved("w1:p1", "w1:t1", "session-a", "Generated")];
+        let initial = manager
+            .reconcile(true, &[tab("w1:t1", 1, "baseline", "w1:p1")], &panes, now)
+            .unwrap();
+        complete(&mut manager, &initial[0]);
+
+        let stale_snapshot = [tab("w1:t1", 1, "Generated", "w1:p1")];
+        manager
+            .observe_renames(
+                &[TabRenameObservation {
+                    tab_id: "w1:t1".into(),
+                    label: "manual-race".into(),
+                }],
+                &stale_snapshot,
+                &panes,
+            )
+            .unwrap();
+        let cleanup = manager
+            .reconcile(false, &stale_snapshot, &panes, now)
+            .unwrap();
+
+        assert_eq!(cleanup.len(), 1);
+        assert_eq!(cleanup[0].label(), "manual-race");
+    }
+
+    #[test]
+    fn queued_manual_event_survives_plugin_rename_race() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut manager =
+            TabNameManager::load(temp.path(), Path::new("/tmp/herdr-event-race.sock")).unwrap();
+        let now = Instant::now();
+        let panes = [resolved("w1:p1", "w1:t1", "session-a", "Generated")];
+        let initial = manager
+            .reconcile(true, &[tab("w1:t1", 1, "baseline", "w1:p1")], &panes, now)
+            .unwrap();
+        complete(&mut manager, &initial[0]);
+
+        let manual = "manual won the race";
+        let overwritten_snapshot = [tab("w1:t1", 1, "Generated", "w1:p1")];
+        manager
+            .observe_renames(
+                &[TabRenameObservation {
+                    tab_id: "w1:t1".into(),
+                    label: manual.into(),
+                }],
+                &overwritten_snapshot,
+                &panes,
+            )
+            .unwrap();
+        let restored = manager
+            .reconcile(true, &overwritten_snapshot, &panes, now)
+            .unwrap();
+
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].label(), manual);
     }
 
     #[test]
@@ -873,6 +1135,16 @@ mod tests {
         assert_eq!(retried.len(), 1);
         assert_eq!(retried[0].label(), "first baseline");
         complete(&mut restarted, &retried[0]);
+        let confirmed_tabs = [
+            tab("w1:t1", 1, "first baseline", "w1:p1"),
+            tab("w1:t2", 2, "offline manual", "w1:p2"),
+        ];
+        assert!(
+            restarted
+                .reconcile(false, &confirmed_tabs, &panes, now)
+                .unwrap()
+                .is_empty()
+        );
         assert!(restarted.document.tabs.is_empty());
         assert!(!restarted.state_file.path().exists());
     }
@@ -941,6 +1213,12 @@ mod tests {
             .unwrap();
         assert_eq!(restored[0].label(), "3");
         complete(&mut manager, &restored[0]);
+        assert!(
+            manager
+                .reconcile(true, &[tab("w1:t1", 3, "3", "w1:p-shell")], &[], now)
+                .unwrap()
+                .is_empty()
+        );
         assert!(manager.document.tabs.is_empty());
 
         let initial = manager
@@ -968,6 +1246,79 @@ mod tests {
             .unwrap();
         assert!(exact.is_empty());
         assert!(manager.document.tabs.is_empty());
+    }
+
+    #[test]
+    fn generated_pending_does_not_block_new_identity_after_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let socket = Path::new("/tmp/herdr-generated-retry.sock");
+        let now = Instant::now();
+        let mut manager = TabNameManager::load(temp.path(), socket).unwrap();
+        let old_a = [resolved("w1:p1", "w1:t1", "session-a", "Alpha old")];
+        let initial = manager
+            .reconcile(true, &[tab("w1:t1", 1, "baseline", "w1:p1")], &old_a, now)
+            .unwrap();
+        complete(&mut manager, &initial[0]);
+        let new_a = [resolved("w1:p1", "w1:t1", "session-a", "Alpha new")];
+        let pending = manager
+            .reconcile(true, &[tab("w1:t1", 1, "Alpha old", "w1:p1")], &new_a, now)
+            .unwrap();
+        assert_eq!(pending[0].label(), "Alpha new");
+        drop(manager);
+
+        let b = [resolved("w1:p2", "w1:t1", "session-b", "Beta")];
+        let mut restarted = TabNameManager::load(temp.path(), socket).unwrap();
+        let effects = restarted
+            .reconcile(true, &[tab("w1:t1", 1, "Alpha old", "w1:p2")], &b, now)
+            .unwrap();
+
+        assert_eq!(effects.len(), 1);
+        assert_eq!(effects[0].label(), "Beta");
+    }
+
+    #[test]
+    fn unresolved_identity_baseline_transition_retries_after_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let socket = Path::new("/tmp/herdr-unresolved-retry.sock");
+        let now = Instant::now();
+        let a = [resolved("w1:p1", "w1:t1", "session-a", "Alpha")];
+        let mut manager = TabNameManager::load(temp.path(), socket).unwrap();
+        let initial = manager
+            .reconcile(true, &[tab("w1:t1", 1, "baseline", "w1:p1")], &a, now)
+            .unwrap();
+        complete(&mut manager, &initial[0]);
+        let b = [PaneSnapshot {
+            pane_id: "w1:p2".into(),
+            tab_id: "w1:t1".into(),
+            context: PaneContext::Supported {
+                agent: "pi".into(),
+                identity: "session-b".into(),
+                display: DisplayState::Failed,
+            },
+        }];
+        manager.note_focus("w1:t1", now);
+        let pending = manager
+            .reconcile(
+                true,
+                &[tab("w1:t1", 1, "Alpha", "w1:p2")],
+                &b,
+                now + FOCUS_DEBOUNCE,
+            )
+            .unwrap();
+        assert_eq!(pending[0].label(), "baseline");
+        drop(manager);
+
+        let mut restarted = TabNameManager::load(temp.path(), socket).unwrap();
+        let retried = restarted
+            .reconcile(
+                true,
+                &[tab("w1:t1", 1, "Alpha", "w1:p2")],
+                &b,
+                now + FOCUS_DEBOUNCE,
+            )
+            .unwrap();
+        assert_eq!(retried.len(), 1);
+        assert_eq!(retried[0].label(), "baseline");
     }
 
     #[test]

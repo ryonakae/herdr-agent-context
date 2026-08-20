@@ -106,7 +106,13 @@ impl ClaudeBackend {
                                 self.bindings.insert(pane.key.clone(), binding);
                             }
                             Ok(None) | Err(_) => {
-                                outcomes.insert(pane.key.clone(), BackendOutcome::Failed);
+                                outcomes.insert(
+                                    pane.key.clone(),
+                                    BackendOutcome::FailedIdentity {
+                                        agent: CLAUDE_AGENT,
+                                        session_identity: reference.value.clone(),
+                                    },
+                                );
                             }
                         }
                         continue;
@@ -130,7 +136,13 @@ impl ClaudeBackend {
                                 self.bindings.insert(pane.key.clone(), binding);
                             }
                             Ok(None) | Err(_) => {
-                                outcomes.insert(pane.key.clone(), BackendOutcome::Failed);
+                                outcomes.insert(
+                                    pane.key.clone(),
+                                    BackendOutcome::FailedIdentity {
+                                        agent: CLAUDE_AGENT,
+                                        session_identity,
+                                    },
+                                );
                             }
                         }
                         continue;
@@ -247,7 +259,10 @@ impl ClaudeBackend {
                         view: verified_terminal_title(view.display, pane.terminal_title.as_deref()),
                     }
                 }
-                _ => BackendOutcome::Failed,
+                _ => BackendOutcome::FailedIdentity {
+                    agent: CLAUDE_AGENT,
+                    session_identity: candidate.session_identity.clone(),
+                },
             };
             outcomes.insert(pane.key.clone(), outcome);
         }
@@ -371,6 +386,35 @@ mod tests {
             .unwrap()
             .set_modified(modified)
             .unwrap();
+    }
+
+    #[test]
+    fn missing_exact_session_preserves_the_observed_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let session_id = "10000000-0000-4000-8000-000000000099";
+        let config = Config {
+            claude_session_dirs: vec![temp.path().to_owned()],
+            ..Config::default()
+        };
+        let mut input = pane("p1");
+        input.processes[0].argv = Some(vec![
+            "claude".into(),
+            "--session-id".into(),
+            session_id.into(),
+        ]);
+
+        let outcomes = ClaudeBackend::default().reconcile(
+            &config,
+            Path::new("/no-home"),
+            &HashMap::new(),
+            std::slice::from_ref(&input),
+        );
+
+        assert!(matches!(
+            &outcomes[&input.key],
+            BackendOutcome::FailedIdentity { agent, session_identity }
+                if *agent == CLAUDE_AGENT && session_identity == session_id
+        ));
     }
 
     #[test]

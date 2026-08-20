@@ -103,9 +103,17 @@ pub struct TabLayout {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+pub struct SnapshotPane {
+    pub pane_id: String,
+    pub workspace_id: String,
+    pub tab_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 pub struct SessionSnapshot {
     pub tabs: Vec<TabInfo>,
     pub layouts: Vec<TabLayout>,
+    pub panes: Vec<SnapshotPane>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -298,7 +306,9 @@ mod tests {
                     {"workspace_id":"w1","tab_id":"w1:t1","focused_pane_id":"w1:p2","future":true},
                     {"workspace_id":"w1","tab_id":"w1:t2","focused_pane_id":"w1:p3"}
                 ],
-                "workspaces": [], "panes": [], "agents": [], "future": true
+                "workspaces": [],
+                "panes": [{"pane_id":"w1:p2","workspace_id":"w1","tab_id":"w1:t1"}],
+                "agents": [], "future": true
             }
         }))
         .unwrap();
@@ -306,6 +316,7 @@ mod tests {
         assert_eq!(snapshot.tabs[0].number, 7);
         assert_eq!(snapshot.layouts[0].focused_pane_id, "w1:p2");
         assert_eq!(snapshot.layouts[1].tab_id, "w1:t2");
+        assert_eq!(snapshot.panes[0].tab_id, "w1:t1");
 
         assert_eq!(
             tab_rename_params("w1:t1", "title"),

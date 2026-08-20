@@ -99,6 +99,10 @@ pub struct DisplayView {
 pub enum BackendOutcome {
     Unbound,
     Failed,
+    FailedIdentity {
+        agent: &'static str,
+        session_identity: String,
+    },
     Resolved {
         agent: &'static str,
         binding: Binding,

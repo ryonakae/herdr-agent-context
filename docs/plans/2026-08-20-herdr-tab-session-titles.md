@@ -375,7 +375,7 @@ Implementation-time minor file changes or internal naming differences must be re
 - Added `src/tab_name/` with an agent-neutral manager for focused selection, 150 ms trailing deadlines, non-agent retention, session transitions, tab-local manual overrides, probable-auto restoration, pane moves, disable cleanup, and missing-tab cleanup.
 - Added versioned socket-scoped SHA-256 state with owner-only modes, strict schema validation, content-free errors, directory-FD-relative `openat`/`renameat`/`unlinkat`, inode/path replacement checks, atomic sync, and retryable pending/finalization rollback.
 - Minor file difference: `AGENTS.md` now lists the new durable ownership subsystem; `sha2` and its locked transitive dependencies were added.
-- Focused policy/state tests (including prior/target/neither restart recovery, focus/manual races, write failures, and path replacement), full validation, and high-impact review passed. Four initial blocking/high review findings were fixed; re-review found none remaining.
+- Focused policy/state tests (including prior/target/neither restart recovery, focus/manual races, write failures, and path replacement), full validation, and high-impact review passed. Final-review follow-up added semantic source/target validation, queued manual-event protection across generated and release RPC races, release-confirmation tombstones, and generated-pending identity-loss recovery; re-review found no blocking/high issue.
 
 ### Task 4: Runtime and Listener Lifecycle Integration
 
@@ -433,7 +433,7 @@ Implementation-time minor file changes or internal naming differences must be re
 - Main now loads `HERDR_PLUGIN_STATE_DIR`, schedules known/unknown focus deadlines without moving the absolute poll deadline, reconciles config changes immediately, gates tab-only events when default-off, and reports content-free tab-only failures.
 - Pi now preserves a complete normalized name source independently from its 80-scalar sidebar value. Snapshot arrays are mandatory; shape errors are classified separately from transport failures.
 - Focused runtime/scheduler tests and an enabled listener subprocess cover background tabs, Pi/Claude focus debounce, default-off inactivity, config disable restoration, workspace/shape/state isolation, RPC-pre-ack rename events, and feedback-loop prevention.
-- Full validation passed. Task-level reviews found workspace/snapshot/source/default-off/deadline issues; all blocking/high findings were fixed and final re-review approved the result.
+- Full validation passed. Task-level and final reviews found workspace/snapshot/source/default-off/deadline issues; follow-up added authoritative snapshot pane membership, non-destructive stale-cycle retry, actual-detection-time deadline deferral, identity-preserving Claude failures, and RPC-pre-ack manual rename recovery. Final re-review approved the result with no blocking/high issue.
 
 ### Task 5: Public Contract, Live Smoke, and Full Validation
 

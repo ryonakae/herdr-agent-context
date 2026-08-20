@@ -50,6 +50,10 @@ pub(crate) struct TabState {
     pub(crate) overrides: BTreeMap<String, String>,
     pub(crate) applied: Option<Applied>,
     pub(crate) pending: Option<PendingTransition>,
+    #[serde(default)]
+    pub(crate) stale_target_digest: Option<String>,
+    #[serde(default)]
+    pub(crate) release_confirmed: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -473,16 +477,84 @@ fn validate_tab(tab: &TabState) -> Result<(), StateError> {
     for identity_digest in tab.overrides.keys() {
         validate_digest(identity_digest)?;
     }
-    if let Some(applied) = &tab.applied {
-        validate_digest(&applied.target_digest)?;
-        validate_applied_source(&applied.source)?;
+    let applied = tab.applied.as_ref().ok_or(StateError::Malformed)?;
+    validate_digest(&applied.target_digest)?;
+    validate_applied_source(&applied.source)?;
+    validate_source_target(&applied.source, &applied.target_digest, tab)?;
+    if tab.pending.is_none() {
+        validate_source_reachability(&applied.source, tab)?;
     }
     if let Some(pending) = &tab.pending {
         validate_digest(&pending.prior_digest)?;
         validate_digest(&pending.target_digest)?;
-        if let PendingDisposition::Keep { source } = &pending.disposition {
-            validate_applied_source(source)?;
+        match &pending.disposition {
+            PendingDisposition::Keep { source } => {
+                validate_applied_source(source)?;
+                validate_source_reachability(source, tab)?;
+                validate_source_target(source, &pending.target_digest, tab)?;
+            }
+            PendingDisposition::Release => validate_baseline_target(&pending.target_digest, tab)?,
         }
+    }
+    if let Some(stale_target_digest) = &tab.stale_target_digest {
+        validate_digest(stale_target_digest)?;
+    }
+    if tab.release_confirmed
+        && (tab.pending.is_some() || !matches!(applied.source, AppliedSource::Baseline))
+    {
+        return Err(StateError::Malformed);
+    }
+    Ok(())
+}
+
+fn validate_source_target(
+    source: &AppliedSource,
+    target_digest: &str,
+    tab: &TabState,
+) -> Result<(), StateError> {
+    match source {
+        AppliedSource::Override { identity_digest } => {
+            let label = tab
+                .overrides
+                .get(identity_digest)
+                .ok_or(StateError::Malformed)?;
+            if digest_label(label) != target_digest {
+                return Err(StateError::Malformed);
+            }
+        }
+        AppliedSource::Baseline => validate_baseline_target(target_digest, tab)?,
+        AppliedSource::Generated { .. } => {}
+    }
+    Ok(())
+}
+
+fn validate_baseline_target(target_digest: &str, tab: &TabState) -> Result<(), StateError> {
+    if let Baseline::Exact { value } = &tab.baseline {
+        if digest_label(value) != target_digest {
+            return Err(StateError::Malformed);
+        }
+    }
+    Ok(())
+}
+
+fn validate_source_reachability(source: &AppliedSource, tab: &TabState) -> Result<(), StateError> {
+    let identity_digest = match source {
+        AppliedSource::Generated { identity_digest }
+        | AppliedSource::Override { identity_digest } => identity_digest,
+        AppliedSource::Baseline => return Ok(()),
+    };
+    if tab
+        .selection
+        .as_ref()
+        .map(|selection| &selection.identity_digest)
+        != Some(identity_digest)
+    {
+        return Err(StateError::Malformed);
+    }
+    if matches!(source, AppliedSource::Override { .. })
+        && !tab.overrides.contains_key(identity_digest)
+    {
+        return Err(StateError::Malformed);
     }
     Ok(())
 }
@@ -551,9 +623,11 @@ mod tests {
                 prior_digest: digest_label("previous synthetic title"),
                 target_digest: digest_label(GENERATED_TITLE),
                 disposition: PendingDisposition::Keep {
-                    source: AppliedSource::Override { identity_digest },
+                    source: AppliedSource::Generated { identity_digest },
                 },
             }),
+            stale_target_digest: None,
+            release_confirmed: false,
         }
     }
 
@@ -768,6 +842,45 @@ mod tests {
         let (_, empty) =
             StateFile::open(temporary.path(), Path::new(SOCKET_A)).expect("empty reload");
         assert!(empty.tabs.is_empty());
+    }
+
+    #[test]
+    fn rejects_source_target_digest_mismatch() {
+        let temporary = tempdir().expect("temporary directory");
+        let (file, initial) = StateFile::open(temporary.path(), Path::new(SOCKET_A)).expect("open");
+        let mut state = sample_state(initial.socket_digest);
+        let tab = state.tabs.get_mut("tab-a").expect("tab");
+        let identity_digest = tab.selection.as_ref().unwrap().identity_digest.clone();
+        tab.pending = None;
+        tab.applied = Some(Applied {
+            target_digest: digest_label("not the manual override"),
+            source: AppliedSource::Override { identity_digest },
+        });
+        let invalid = serde_json::to_vec(&state).expect("invalid document");
+        write_owner_only(file.path(), &invalid);
+
+        assert!(matches!(
+            StateFile::open(temporary.path(), Path::new(SOCKET_A)),
+            Err(StateError::Malformed)
+        ));
+        assert!(fs::read(file.path()).expect("preserved state") == invalid);
+    }
+
+    #[test]
+    fn rejects_semantically_unreachable_state_without_applied_label() {
+        let temporary = tempdir().expect("temporary directory");
+        let (file, initial) = StateFile::open(temporary.path(), Path::new(SOCKET_A)).expect("open");
+        let state = sample_state(initial.socket_digest);
+        let mut value = serde_json::to_value(state).expect("state value");
+        value["tabs"]["tab-a"]["applied"] = serde_json::Value::Null;
+        let invalid = serde_json::to_vec(&value).expect("invalid document");
+        write_owner_only(file.path(), &invalid);
+
+        assert!(matches!(
+            StateFile::open(temporary.path(), Path::new(SOCKET_A)),
+            Err(StateError::Malformed)
+        ));
+        assert!(fs::read(file.path()).expect("preserved state") == invalid);
     }
 
     #[test]
