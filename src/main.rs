@@ -84,6 +84,7 @@ fn listen_forever(
                 continue;
             }
         };
+        runtime.reset_tab_event_expectations();
         match runtime.reconcile(&mut transport) {
             Ok(status) => report_tab_name_status(status),
             Err(error) => {

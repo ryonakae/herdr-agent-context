@@ -433,7 +433,7 @@ Implementation-time minor file changes or internal naming differences must be re
 - Main now loads `HERDR_PLUGIN_STATE_DIR`, schedules known/unknown focus deadlines without moving the absolute poll deadline, reconciles config changes immediately, gates tab-only events when default-off, and reports content-free tab-only failures.
 - Pi now preserves a complete normalized name source independently from its 80-scalar sidebar value. Snapshot arrays are mandatory; shape errors are classified separately from transport failures.
 - Focused runtime/scheduler tests and an enabled listener subprocess cover background tabs, Pi/Claude focus debounce, default-off inactivity, config disable restoration, workspace/shape/state isolation, RPC-pre-ack rename events, and feedback-loop prevention.
-- Full validation passed. Task-level and final reviews found workspace/snapshot/source/default-off/deadline issues; follow-up added authoritative snapshot pane membership, non-destructive stale-cycle retry, actual-detection-time deadline deferral, identity-preserving Claude failures, and RPC-pre-ack manual rename recovery. Final re-review approved the result with no blocking/high issue.
+- Full validation passed. Task-level and final reviews drove additional hardening: authoritative snapshot pane membership, identity-preserving Claude failures, queued and delayed plugin-event digests, Release tombstones, source/target semantic validation, all PendingPrior variants, implicit snapshot focus debounce, and actual-detection-time stale-cycle deferral. Final validation reached 104 library, 6 binary, and 33 integration tests; independent re-review reported no blocking/high issue and approved the result.
 
 ### Task 5: Public Contract, Live Smoke, and Full Validation
 

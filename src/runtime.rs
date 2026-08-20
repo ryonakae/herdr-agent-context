@@ -83,6 +83,13 @@ impl Runtime {
         self.tab_names.is_some()
     }
 
+    pub fn reset_tab_event_expectations(&mut self) {
+        self.pending_tab_renames.clear();
+        if let Some(manager) = self.tab_names.as_mut() {
+            manager.reset_event_expectations();
+        }
+    }
+
     pub fn note_tab_rename(&mut self, tab_id: Option<&str>, label: Option<&str>) {
         if !self.tab_event_reconcile_needed() {
             return;

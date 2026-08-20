@@ -5,7 +5,7 @@ use state::{
     Applied, AppliedSource, Baseline, PendingDisposition, PendingTransition, PersistedState,
     Selection, StateFile, TabState, digest_identity, digest_label,
 };
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::Path;
 use std::time::{Duration, Instant};
 use thiserror::Error;
@@ -90,6 +90,7 @@ pub struct TabNameManager {
     state_file: StateFile,
     document: PersistedState,
     focus_deadlines: HashMap<String, Instant>,
+    expected_events: HashMap<String, VecDeque<String>>,
 }
 
 impl TabNameManager {
@@ -100,7 +101,12 @@ impl TabNameManager {
             state_file,
             document,
             focus_deadlines: HashMap::new(),
+            expected_events: HashMap::new(),
         })
+    }
+
+    pub fn reset_event_expectations(&mut self) {
+        self.expected_events.clear();
     }
 
     pub fn note_focus(&mut self, tab_id: &str, now: Instant) {
@@ -133,13 +139,16 @@ impl TabNameManager {
         let before = self.document.clone();
         let tabs_by_id: HashMap<_, _> = tabs.iter().map(|tab| (tab.tab_id.as_str(), tab)).collect();
         for observation in observations {
+            let observed_digest = digest_label(&observation.label);
+            if self.consume_expected_event(&observation.tab_id, &observed_digest) {
+                continue;
+            }
             let Some(tab) = tabs_by_id.get(observation.tab_id.as_str()) else {
                 continue;
             };
             let Some(tab_state) = self.document.tabs.get_mut(&observation.tab_id) else {
                 continue;
             };
-            let observed_digest = digest_label(&observation.label);
             let pending_target = tab_state
                 .pending
                 .as_ref()
@@ -190,6 +199,8 @@ impl TabNameManager {
             .retain(|tab_id, _| live_tabs.contains(tab_id.as_str()));
         self.focus_deadlines
             .retain(|tab_id, _| live_tabs.contains(tab_id.as_str()));
+        self.expected_events
+            .retain(|tab_id, _| live_tabs.contains(tab_id.as_str()));
 
         if !enabled && !self.document.tabs.is_empty() {
             self.document.cleanup_pending = true;
@@ -203,6 +214,24 @@ impl TabNameManager {
         let mut release_tabs = Vec::new();
 
         for tab in tabs {
+            if !self.focus_deadlines.contains_key(&tab.tab_id) {
+                let focused_identity = panes_by_id
+                    .get(tab.focused_pane_id.as_str())
+                    .and_then(|pane| context_digest(pane, &tab.tab_id));
+                let selected_identity = self
+                    .document
+                    .tabs
+                    .get(&tab.tab_id)
+                    .and_then(|tab_state| tab_state.selection.as_ref())
+                    .map(|selection| selection.identity_digest.as_str());
+                if focused_identity.as_deref().is_some()
+                    && focused_identity.as_deref() != selected_identity
+                    && selected_identity.is_some()
+                {
+                    self.focus_deadlines
+                        .insert(tab.tab_id.clone(), now + FOCUS_DEBOUNCE);
+                }
+            }
             let focus_blocked = self
                 .focus_deadlines
                 .get(&tab.tab_id)
@@ -222,6 +251,15 @@ impl TabNameManager {
                 release_tabs.push(tab.tab_id.clone());
                 continue;
             }
+            if self
+                .document
+                .tabs
+                .get(&tab.tab_id)
+                .is_some_and(|tab_state| tab_state.release_confirmed)
+                && self.has_expected_events(&tab.tab_id)
+            {
+                continue;
+            }
             if observation == Observation::PendingPrior {
                 let tab_state = self.document.tabs.get_mut(&tab.tab_id).unwrap();
                 if !acquiring {
@@ -229,6 +267,12 @@ impl TabNameManager {
                 } else {
                     let pending = tab_state.pending.clone().unwrap();
                     if let Some(target) = pending_target_label(tab_state, tab, panes, &pending) {
+                        if matches!(&pending.disposition, PendingDisposition::Release)
+                            && digest_label(&target) == digest_label(&tab.observed_label)
+                        {
+                            release_tabs.push(tab.tab_id.clone());
+                            continue;
+                        }
                         plan_target(
                             &tab.tab_id,
                             &tab.observed_label,
@@ -239,7 +283,9 @@ impl TabNameManager {
                         );
                         continue;
                     }
-                    if pending_generated_identity_is_live(&pending, tab, panes) {
+                    if !pending_generated_focus_changed(&pending, tab, panes)
+                        && pending_generated_identity_is_live(&pending, tab, panes)
+                    {
                         continue;
                     }
                     tab_state.pending = None;
@@ -402,6 +448,7 @@ impl TabNameManager {
 
         for tab_id in release_tabs {
             self.document.tabs.remove(&tab_id);
+            self.expected_events.remove(&tab_id);
         }
         if self.document.tabs.is_empty() {
             self.document.cleanup_pending = false;
@@ -464,7 +511,37 @@ impl TabNameManager {
             self.document = before;
             return Err(error);
         }
+        match completion {
+            RenameCompletion::Applied => self
+                .expected_events
+                .entry(token.tab_id.clone())
+                .or_default()
+                .push_back(token.target_digest.clone()),
+            RenameCompletion::MissingTab => {
+                self.expected_events.remove(&token.tab_id);
+            }
+        }
         Ok(())
+    }
+
+    fn has_expected_events(&self, tab_id: &str) -> bool {
+        self.expected_events
+            .get(tab_id)
+            .is_some_and(|events| !events.is_empty())
+    }
+
+    fn consume_expected_event(&mut self, tab_id: &str, digest: &str) -> bool {
+        let Some(events) = self.expected_events.get_mut(tab_id) else {
+            return false;
+        };
+        let Some(index) = events.iter().position(|expected| expected == digest) else {
+            return false;
+        };
+        events.remove(index);
+        if events.is_empty() {
+            self.expected_events.remove(tab_id);
+        }
+        true
     }
 
     fn persist_document(&self) -> Result<(), TabNameError> {
@@ -519,6 +596,24 @@ fn recover_observation(
         record_manual(tab_state, tab, panes);
     }
     Observation::Retained
+}
+
+fn pending_generated_focus_changed(
+    pending: &PendingTransition,
+    tab: &TabSnapshot,
+    panes: &[PaneSnapshot],
+) -> bool {
+    let PendingDisposition::Keep {
+        source: AppliedSource::Generated { identity_digest },
+    } = &pending.disposition
+    else {
+        return false;
+    };
+    panes
+        .iter()
+        .find(|pane| pane.pane_id == tab.focused_pane_id && pane.tab_id == tab.tab_id)
+        .and_then(|pane| context_digest(pane, &tab.tab_id))
+        .is_some_and(|focused_identity| focused_identity != *identity_digest)
 }
 
 fn pending_generated_identity_is_live(
@@ -882,6 +977,48 @@ mod tests {
     }
 
     #[test]
+    fn delayed_old_plugin_event_is_not_classified_as_manual() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut manager =
+            TabNameManager::load(temp.path(), Path::new("/tmp/herdr-delayed-event.sock")).unwrap();
+        let now = Instant::now();
+        let first = [resolved("w1:p1", "w1:t1", "session-a", "Generated one")];
+        let initial = manager
+            .reconcile(true, &[tab("w1:t1", 1, "baseline", "w1:p1")], &first, now)
+            .unwrap();
+        complete(&mut manager, &initial[0]);
+        let second = [resolved("w1:p1", "w1:t1", "session-a", "Generated two")];
+        let update = manager
+            .reconcile(
+                true,
+                &[tab("w1:t1", 1, "Generated one", "w1:p1")],
+                &second,
+                now,
+            )
+            .unwrap();
+        complete(&mut manager, &update[0]);
+
+        let current = [tab("w1:t1", 1, "Generated two", "w1:p1")];
+        manager
+            .observe_renames(
+                &[TabRenameObservation {
+                    tab_id: "w1:t1".into(),
+                    label: "Generated one".into(),
+                }],
+                &current,
+                &second,
+            )
+            .unwrap();
+
+        assert!(
+            manager
+                .reconcile(true, &current, &second, now)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn queued_manual_event_survives_plugin_rename_race() {
         let temp = tempfile::tempdir().unwrap();
         let mut manager =
@@ -1135,6 +1272,7 @@ mod tests {
         assert_eq!(retried.len(), 1);
         assert_eq!(retried[0].label(), "first baseline");
         complete(&mut restarted, &retried[0]);
+        restarted.reset_event_expectations();
         let confirmed_tabs = [
             tab("w1:t1", 1, "first baseline", "w1:p1"),
             tab("w1:t2", 2, "offline manual", "w1:p2"),
@@ -1193,6 +1331,37 @@ mod tests {
     }
 
     #[test]
+    fn release_pending_finishes_when_reordered_baseline_matches_prior_label() {
+        let temp = tempfile::tempdir().unwrap();
+        let socket = Path::new("/tmp/herdr-release-reorder.sock");
+        let now = Instant::now();
+        let mut manager = TabNameManager::load(temp.path(), socket).unwrap();
+        let initial = manager
+            .reconcile(
+                true,
+                &[tab("w1:t1", 1, "1", "w1:p1")],
+                &[resolved("w1:p1", "w1:t1", "session-a", "2")],
+                now,
+            )
+            .unwrap();
+        complete(&mut manager, &initial[0]);
+        let release = manager
+            .reconcile(true, &[tab("w1:t1", 1, "2", "w1:p-shell")], &[], now)
+            .unwrap();
+        assert_eq!(release[0].label(), "1");
+        drop(manager);
+
+        let mut restarted = TabNameManager::load(temp.path(), socket).unwrap();
+        assert!(
+            restarted
+                .reconcile(true, &[tab("w1:t1", 2, "2", "w1:p-shell")], &[], now)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(restarted.document.tabs.is_empty());
+    }
+
+    #[test]
     fn probable_auto_tracks_reorder_but_manual_numeric_baseline_stays_exact() {
         let temp = tempfile::tempdir().unwrap();
         let mut manager =
@@ -1213,6 +1382,7 @@ mod tests {
             .unwrap();
         assert_eq!(restored[0].label(), "3");
         complete(&mut manager, &restored[0]);
+        manager.reset_event_expectations();
         assert!(
             manager
                 .reconcile(true, &[tab("w1:t1", 3, "3", "w1:p-shell")], &[], now)
@@ -1249,6 +1419,55 @@ mod tests {
     }
 
     #[test]
+    fn generated_pending_does_not_block_focused_identity_when_old_identity_is_failed() {
+        let temp = tempfile::tempdir().unwrap();
+        let socket = Path::new("/tmp/herdr-generated-focused.sock");
+        let now = Instant::now();
+        let mut manager = TabNameManager::load(temp.path(), socket).unwrap();
+        let old_a = [resolved("w1:p1", "w1:t1", "session-a", "Alpha old")];
+        let initial = manager
+            .reconcile(true, &[tab("w1:t1", 1, "baseline", "w1:p1")], &old_a, now)
+            .unwrap();
+        complete(&mut manager, &initial[0]);
+        let new_a = [resolved("w1:p1", "w1:t1", "session-a", "Alpha new")];
+        manager
+            .reconcile(true, &[tab("w1:t1", 1, "Alpha old", "w1:p1")], &new_a, now)
+            .unwrap();
+        drop(manager);
+
+        let panes = [
+            PaneSnapshot {
+                pane_id: "w1:p1".into(),
+                tab_id: "w1:t1".into(),
+                context: PaneContext::Supported {
+                    agent: "pi".into(),
+                    identity: "session-a".into(),
+                    display: DisplayState::Failed,
+                },
+            },
+            resolved("w1:p2", "w1:t1", "session-b", "Beta"),
+        ];
+        let mut restarted = TabNameManager::load(temp.path(), socket).unwrap();
+        assert!(
+            restarted
+                .reconcile(true, &[tab("w1:t1", 1, "Alpha old", "w1:p2")], &panes, now)
+                .unwrap()
+                .is_empty()
+        );
+        let effects = restarted
+            .reconcile(
+                true,
+                &[tab("w1:t1", 1, "Alpha old", "w1:p2")],
+                &panes,
+                now + FOCUS_DEBOUNCE,
+            )
+            .unwrap();
+
+        assert_eq!(effects.len(), 1);
+        assert_eq!(effects[0].label(), "Beta");
+    }
+
+    #[test]
     fn generated_pending_does_not_block_new_identity_after_restart() {
         let temp = tempfile::tempdir().unwrap();
         let socket = Path::new("/tmp/herdr-generated-retry.sock");
@@ -1268,10 +1487,21 @@ mod tests {
 
         let b = [resolved("w1:p2", "w1:t1", "session-b", "Beta")];
         let mut restarted = TabNameManager::load(temp.path(), socket).unwrap();
-        let effects = restarted
+        let baseline = restarted
             .reconcile(true, &[tab("w1:t1", 1, "Alpha old", "w1:p2")], &b, now)
             .unwrap();
-
+        assert_eq!(baseline.len(), 1);
+        assert_eq!(baseline[0].label(), "baseline");
+        complete(&mut restarted, &baseline[0]);
+        restarted.reset_event_expectations();
+        let effects = restarted
+            .reconcile(
+                true,
+                &[tab("w1:t1", 1, "baseline", "w1:p2")],
+                &b,
+                now + FOCUS_DEBOUNCE,
+            )
+            .unwrap();
         assert_eq!(effects.len(), 1);
         assert_eq!(effects[0].label(), "Beta");
     }
@@ -1448,6 +1678,39 @@ mod tests {
             .unwrap();
         assert_eq!(restored.len(), 1);
         assert_eq!(restored[0].label(), "baseline");
+    }
+
+    #[test]
+    fn snapshot_detected_focus_change_starts_its_own_debounce() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut manager =
+            TabNameManager::load(temp.path(), Path::new("/tmp/herdr-snapshot-focus.sock")).unwrap();
+        let now = Instant::now();
+        let panes = [
+            resolved("w1:p1", "w1:t1", "session-a", "Alpha"),
+            resolved("w1:p2", "w1:t1", "session-b", "Beta"),
+        ];
+        let initial = manager
+            .reconcile(true, &[tab("w1:t1", 1, "baseline", "w1:p1")], &panes, now)
+            .unwrap();
+        complete(&mut manager, &initial[0]);
+
+        assert!(
+            manager
+                .reconcile(true, &[tab("w1:t1", 1, "Alpha", "w1:p2")], &panes, now,)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(manager.next_deadline(), Some(now + FOCUS_DEBOUNCE));
+        let beta = manager
+            .reconcile(
+                true,
+                &[tab("w1:t1", 1, "Alpha", "w1:p2")],
+                &panes,
+                now + FOCUS_DEBOUNCE,
+            )
+            .unwrap();
+        assert_eq!(beta[0].label(), "Beta");
     }
 
     #[test]
