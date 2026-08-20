@@ -530,7 +530,7 @@ Implementation-time minor file changes or internal naming differences must be re
 - [x] Isolated disposable-session tab-name smoke in `docs/release-checklist.md` — Expected: generated/custom Claude title, Pi name, focus debounce, non-agent retention, manual override, exit restoration, config disable cleanup, and restart recovery all match the contract without committing real transcript fixtures.
 - [x] Requirement Coverage has no unmatched requirement or decision.
 - [x] The plan and actual changed-file set agree, with minor differences recorded in the relevant task.
-- [ ] After every item above succeeds, move this file without renaming it to `docs/plans/archived/2026-08-20-herdr-tab-session-titles.md`.
+- [x] After every item above succeeds, move this file without renaming it to `docs/plans/archived/2026-08-20-herdr-tab-session-titles.md`.
 
 ## Risks and Open Questions
 
