@@ -208,7 +208,7 @@ Writes use a same-directory temporary file, owner-only permissions, flush/sync a
 
 - [x] Task 1: Align Claude's shared sidebar/tab display title and Unicode bounding contracts.
 - [x] Task 2: Add opt-in configuration and the Herdr topology/rename/event transport contract.
-- [ ] Task 3: Implement durable tab ownership, manual overrides, restoration, and crash recovery.
+- [x] Task 3: Implement durable tab ownership, manual overrides, restoration, and crash recovery.
 - [ ] Task 4: Integrate focus-debounced tab synchronization with runtime and listener lifecycle.
 - [ ] Task 5: Publish the user-visible contract and complete automated and disposable-session validation.
 
@@ -370,6 +370,12 @@ Implementation-time minor file changes or internal naming differences must be re
 - Expected: focus, override, baseline, move, status, transition, and bounding policy tests pass.
 - Run: `cargo test tab_name::state::tests --locked`
 - Expected: atomic state, modes, socket scope, digest privacy, pending recovery, and corruption tests pass.
+
+**Implementation record:**
+- Added `src/tab_name/` with an agent-neutral manager for focused selection, 150 ms trailing deadlines, non-agent retention, session transitions, tab-local manual overrides, probable-auto restoration, pane moves, disable cleanup, and missing-tab cleanup.
+- Added versioned socket-scoped SHA-256 state with owner-only modes, strict schema validation, content-free errors, directory-FD-relative `openat`/`renameat`/`unlinkat`, inode/path replacement checks, atomic sync, and retryable pending/finalization rollback.
+- Minor file difference: `AGENTS.md` now lists the new durable ownership subsystem; `sha2` and its locked transitive dependencies were added.
+- Focused policy/state tests (including prior/target/neither restart recovery, focus/manual races, write failures, and path replacement), full validation, and high-impact review passed. Four initial blocking/high review findings were fixed; re-review found none remaining.
 
 ### Task 4: Runtime and Listener Lifecycle Integration
 

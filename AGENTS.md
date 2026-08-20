@@ -24,6 +24,7 @@ Run the focused Rust test first while developing, then run the full validation s
 - `src/claude/`: branch-aware Claude JSONL parsing, bounded discovery, CLI eligibility, and conservative binding.
 - `src/herdr/`: protocol 19 values and Unix socket transport.
 - `src/runtime.rs`: reconciliation, TTL refresh/clear behavior, and runtime caches.
+- `src/tab_name/`: durable tab-label ownership, manual overrides, and crash recovery.
 - `src/main.rs`: listener lifecycle, polling deadline, reconnect backoff, and socket-scoped lock.
 - `scripts/`: binary installer and release-contract checks.
 - `tests/listener.rs`: fake socket, runtime, reconnect, and duplicate-listener integration tests.
