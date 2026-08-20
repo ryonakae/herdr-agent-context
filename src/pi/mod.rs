@@ -19,7 +19,7 @@ pub struct PiBackend {
 #[derive(Clone)]
 struct ParsedCache {
     fingerprint: FileFingerprint,
-    view: Option<DisplayView>,
+    view: DisplayView,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -29,6 +29,13 @@ struct FileFingerprint {
 }
 
 impl PiBackend {
+    pub(crate) fn authoritative_binding(&self, key: &PaneKey) -> Option<&crate::backend::Binding> {
+        self.resolver
+            .bindings()
+            .get(key)
+            .filter(|binding| binding.is_official())
+    }
+
     pub fn reconcile(
         &mut self,
         config: &Config,
@@ -68,10 +75,10 @@ impl PiBackend {
         fs::File::open(path).ok()?;
         if let Some(cached) = self.parsed.get(path) {
             if cached.fingerprint == fingerprint {
-                return cached.view.clone();
+                return Some(cached.view.clone());
             }
         }
-        let view = parse_bound_session(path).ok();
+        let view = parse_bound_session(path).ok()?;
         self.parsed.insert(
             path.to_owned(),
             ParsedCache {
@@ -79,6 +86,6 @@ impl PiBackend {
                 view: view.clone(),
             },
         );
-        view
+        Some(view)
     }
 }

@@ -1,6 +1,6 @@
 use super::session::{SessionError, parse_session_header};
 use crate::backend::{
-    Binding, BindingEvidence, Candidate, DisplayView, PaneInput, PaneKey, ProcessCommand,
+    Binding, BindingEvidence, Candidate, DisplayView, PI_AGENT, PaneInput, PaneKey, ProcessCommand,
 };
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -40,7 +40,7 @@ impl Resolver {
     ) -> HashMap<PaneKey, Binding> {
         let eligible: Vec<_> = panes
             .iter()
-            .filter(|pane| pane.agent.eq_ignore_ascii_case("pi"))
+            .filter(|pane| pane.agent.eq_ignore_ascii_case(PI_AGENT))
             .filter(|pane| !has_no_session_process(&pane.processes))
             .collect();
         let live_keys: HashSet<_> = eligible.iter().map(|pane| pane.key.clone()).collect();
@@ -52,19 +52,17 @@ impl Resolver {
             .collect();
 
         for pane in &eligible {
-            if let Some(reference) = &pane.authoritative_session {
-                if reference.kind == "path" {
-                    self.bindings.insert(
-                        pane.key.clone(),
-                        Binding {
-                            path: PathBuf::from(&reference.value),
-                            evidence: BindingEvidence::Official {
-                                source: reference.source.clone(),
-                            },
+            if let Some(reference) = authoritative_path_reference(pane) {
+                self.bindings.insert(
+                    pane.key.clone(),
+                    Binding {
+                        path: PathBuf::from(&reference.value),
+                        evidence: BindingEvidence::Official {
+                            source: reference.source.clone(),
                         },
-                    );
-                    continue;
-                }
+                    },
+                );
+                continue;
             }
 
             let keep = self.bindings.get(&pane.key).is_some_and(|binding| {
@@ -82,11 +80,11 @@ impl Resolver {
         }
 
         let mut panes_by_cwd: HashMap<PathBuf, Vec<&PaneInput>> = HashMap::new();
-        for pane in eligible.iter().copied().filter(|pane| {
-            pane.authoritative_session
-                .as_ref()
-                .is_none_or(|reference| reference.kind != "path")
-        }) {
+        for pane in eligible
+            .iter()
+            .copied()
+            .filter(|pane| authoritative_path_reference(pane).is_none())
+        {
             panes_by_cwd
                 .entry(canonical_or_original(&pane.cwd))
                 .or_default()
@@ -183,6 +181,12 @@ impl Resolver {
             );
         }
     }
+}
+
+fn authoritative_path_reference(pane: &PaneInput) -> Option<&crate::backend::SessionReference> {
+    pane.authoritative_session.as_ref().filter(|reference| {
+        reference.kind == "path" && reference.agent.eq_ignore_ascii_case(PI_AGENT)
+    })
 }
 
 pub fn has_no_session_process(processes: &[ProcessCommand]) -> bool {

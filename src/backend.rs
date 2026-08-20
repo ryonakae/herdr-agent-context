@@ -126,4 +126,8 @@ impl BackendRegistry {
         outcomes.extend(self.claude.reconcile(config, home, env, panes));
         outcomes
     }
+
+    pub(crate) fn authoritative_binding(&self, key: &PaneKey) -> Option<&Binding> {
+        self.pi.authoritative_binding(key)
+    }
 }

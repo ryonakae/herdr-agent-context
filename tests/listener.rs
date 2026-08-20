@@ -714,6 +714,132 @@ fn authoritative_path_wins_over_fallback_and_preserves_source() {
 }
 
 #[test]
+fn authoritative_path_change_clears_previous_metadata_before_new_file_exists() {
+    let temp = tempfile::tempdir().unwrap();
+    let previous = temp.path().join("previous.jsonl");
+    fs::write(
+        &previous,
+        session_text(
+            "{\"type\":\"session_info\",\"id\":\"n1\",\"parentId\":\"a1\",\"name\":\"Previous\"}\n",
+        ),
+    )
+    .unwrap();
+    let mut runtime = runtime_for(temp.path());
+    let mut api = fake_api();
+    api.agents[0].agent_session = Some(AgentSessionInfo {
+        source: "herdr:pi".into(),
+        agent: "pi".into(),
+        kind: "path".into(),
+        value: previous.display().to_string(),
+    });
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(api.reports.len(), 1);
+    assert_eq!(api.reports[0].session_name.as_deref(), Some("Previous"));
+
+    api.agents[0].agent_session.as_mut().unwrap().value =
+        temp.path().join("new.jsonl").display().to_string();
+    runtime.reconcile(&mut api).unwrap();
+
+    assert_eq!(api.reports.len(), 2);
+    assert_eq!(api.reports[1].pane_id, "w1:p1");
+    assert_eq!(api.reports[1].session_name, None);
+    assert_eq!(api.reports[1].last_message, None);
+}
+
+#[test]
+fn authoritative_path_recovers_after_same_fingerprint_parse_failure() {
+    let temp = tempfile::tempdir().unwrap();
+    let previous = temp.path().join("previous.jsonl");
+    fs::write(&previous, session_text("")).unwrap();
+    let pending = temp.path().join("pending.jsonl");
+    let valid = session_text(
+        "{\"type\":\"session_info\",\"id\":\"n1\",\"parentId\":\"a1\",\"name\":\"Recovered\"}\n",
+    );
+    let fixed_time = std::time::SystemTime::now() - Duration::from_secs(30);
+    fs::write(&pending, "x".repeat(valid.len())).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&pending)
+        .unwrap()
+        .set_modified(fixed_time)
+        .unwrap();
+    let mut runtime = runtime_for(temp.path());
+    let mut api = fake_api();
+    api.agents[0].agent_session = Some(AgentSessionInfo {
+        source: "herdr:pi".into(),
+        agent: "pi".into(),
+        kind: "path".into(),
+        value: previous.display().to_string(),
+    });
+    runtime.reconcile(&mut api).unwrap();
+
+    api.agents[0].agent_session.as_mut().unwrap().value = pending.display().to_string();
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(api.reports.len(), 2);
+    assert_eq!(api.reports[1].session_name, None);
+
+    fs::write(&pending, valid).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&pending)
+        .unwrap()
+        .set_modified(fixed_time)
+        .unwrap();
+    runtime.reconcile(&mut api).unwrap();
+
+    assert_eq!(api.reports.len(), 3);
+    assert_eq!(api.reports[2].session_name.as_deref(), Some("Recovered"));
+}
+
+#[test]
+fn authoritative_same_path_parse_failure_does_not_clear_metadata() {
+    let temp = tempfile::tempdir().unwrap();
+    let session = temp.path().join("session.jsonl");
+    fs::write(&session, session_text("")).unwrap();
+    let mut runtime = runtime_for(temp.path());
+    let mut api = fake_api();
+    api.agents[0].agent_session = Some(AgentSessionInfo {
+        source: "herdr:pi".into(),
+        agent: "pi".into(),
+        kind: "path".into(),
+        value: session.display().to_string(),
+    });
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(api.reports.len(), 1);
+
+    fs::write(&session, format!("{}{{", session_text(""))).unwrap();
+    runtime.reconcile(&mut api).unwrap();
+
+    assert_eq!(api.reports.len(), 1);
+}
+
+#[test]
+fn foreign_agent_path_reference_does_not_override_pi_fallback() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(
+        temp.path().join("fallback.jsonl"),
+        session_text(
+            "{\"type\":\"session_info\",\"id\":\"n1\",\"parentId\":\"a1\",\"name\":\"Fallback\"}\n",
+        ),
+    )
+    .unwrap();
+    let mut runtime = runtime_for(temp.path());
+    let mut api = fake_api();
+    api.agents[0].agent_session = Some(AgentSessionInfo {
+        source: "herdr:claude".into(),
+        agent: "claude".into(),
+        kind: "path".into(),
+        value: temp.path().join("foreign.jsonl").display().to_string(),
+    });
+
+    runtime.reconcile(&mut api).unwrap();
+
+    assert_eq!(api.reports.len(), 1);
+    assert_eq!(api.reports[0].session_name.as_deref(), Some("Fallback"));
+    assert_eq!(api.reports[0].applies_to_source, None);
+}
+
+#[test]
 fn authoritative_unreadable_path_never_uses_valid_fallback() {
     let temp = tempfile::tempdir().unwrap();
     fs::write(temp.path().join("fallback.jsonl"), session_text("")).unwrap();

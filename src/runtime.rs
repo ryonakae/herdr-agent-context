@@ -109,7 +109,12 @@ impl Runtime {
                     binding,
                     view,
                 }) => self.report_view(api, pane, agent, binding, view.clone())?,
-                Some(BackendOutcome::Failed) => {}
+                Some(BackendOutcome::Failed) => {
+                    let binding = self.backends.authoritative_binding(&pane.key).cloned();
+                    if let Some(binding) = binding {
+                        self.clear_if_binding_changed(api, pane, &binding)?;
+                    }
+                }
                 Some(BackendOutcome::Unbound) | None => {
                     self.clear_if_reported(api, &pane.key.pane_id)?;
                 }
@@ -192,6 +197,21 @@ impl Runtime {
                 reported: true,
             },
         );
+        Ok(())
+    }
+
+    fn clear_if_binding_changed<A: HerdrApi>(
+        &mut self,
+        api: &mut A,
+        pane: &PaneInput,
+        binding: &Binding,
+    ) -> Result<(), A::Error> {
+        let changed = self.panes.get(&pane.key.pane_id).is_some_and(|state| {
+            state.terminal_id == pane.key.terminal_id && state.binding != binding.path
+        });
+        if changed {
+            self.clear_if_reported(api, &pane.key.pane_id)?;
+        }
         Ok(())
     }
 
