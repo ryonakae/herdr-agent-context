@@ -1,7 +1,7 @@
 use herdr_agent_context::config::Config;
 use herdr_agent_context::herdr::protocol::{
     AgentInfo, AgentSessionInfo, LAST_MESSAGE_TOKEN, ProcessInfo, SESSION_NAME_TOKEN,
-    SessionSnapshot, TabInfo,
+    SessionSnapshot, TabInfo, TabLayout,
 };
 use herdr_agent_context::herdr::socket::{EventPoll, SocketTransport};
 use herdr_agent_context::herdr::{HerdrApi, MetadataReport};
@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug)]
 struct Report {
@@ -31,17 +31,26 @@ struct Report {
 #[derive(Debug)]
 enum FakeError {
     Transient,
+    Topology,
 }
 
 struct FakeApi {
     agents: Vec<AgentInfo>,
     process_args: HashMap<String, Vec<String>>,
+    snapshot: SessionSnapshot,
+    snapshot_calls: usize,
+    fail_snapshot_topology: bool,
+    renames: Vec<(String, String)>,
     reports: Vec<Report>,
     fail_next_clear: bool,
 }
 
 impl HerdrApi for FakeApi {
     type Error = FakeError;
+
+    fn is_tab_topology_error(error: &Self::Error) -> bool {
+        matches!(error, FakeError::Topology)
+    }
 
     fn list_agents(&mut self) -> Result<Vec<AgentInfo>, Self::Error> {
         Ok(self.agents.clone())
@@ -61,19 +70,23 @@ impl HerdrApi for FakeApi {
     }
 
     fn session_snapshot(&mut self) -> Result<SessionSnapshot, Self::Error> {
-        Ok(SessionSnapshot {
-            tabs: Vec::new(),
-            layouts: Vec::new(),
-        })
+        self.snapshot_calls += 1;
+        if self.fail_snapshot_topology {
+            return Err(FakeError::Topology);
+        }
+        Ok(self.snapshot.clone())
     }
 
     fn rename_tab(&mut self, tab_id: &str, label: &str) -> Result<TabInfo, Self::Error> {
-        Ok(TabInfo {
-            tab_id: tab_id.to_owned(),
-            workspace_id: "w1".into(),
-            number: 1,
-            label: label.to_owned(),
-        })
+        self.renames.push((tab_id.to_owned(), label.to_owned()));
+        let tab = self
+            .snapshot
+            .tabs
+            .iter_mut()
+            .find(|tab| tab.tab_id == tab_id)
+            .unwrap();
+        tab.label = label.to_owned();
+        Ok(tab.clone())
     }
 
     fn report_metadata(&mut self, report: MetadataReport<'_>) -> Result<(), Self::Error> {
@@ -132,6 +145,13 @@ fn fake_api() -> FakeApi {
     FakeApi {
         agents: vec![agent()],
         process_args: HashMap::from([("w1:p1".into(), vec!["pi".into()])]),
+        snapshot: SessionSnapshot {
+            tabs: Vec::new(),
+            layouts: Vec::new(),
+        },
+        snapshot_calls: 0,
+        fail_snapshot_topology: false,
+        renames: Vec::new(),
         reports: Vec::new(),
         fail_next_clear: false,
     }
@@ -206,6 +226,354 @@ fn claude_user_only_text(session_id: &str, cwd: &str, title: &str) -> String {
     )
 }
 
+#[test]
+fn tab_name_runtime_renames_from_each_tabs_internal_focus() {
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let state = temp.path().join("state");
+    fs::create_dir(&sessions).unwrap();
+    fs::create_dir(&state).unwrap();
+    fs::write(sessions.join("session.jsonl"), session_text("")).unwrap();
+    let mut api = fake_api();
+    api.agents[0].tab_id = Some("w1:t2".into());
+    api.snapshot = SessionSnapshot {
+        tabs: vec![
+            TabInfo {
+                tab_id: "w1:t1".into(),
+                workspace_id: "w1".into(),
+                number: 7,
+                label: "1".into(),
+            },
+            TabInfo {
+                tab_id: "w1:t2".into(),
+                workspace_id: "w1".into(),
+                number: 9,
+                label: "2".into(),
+            },
+        ],
+        layouts: vec![
+            TabLayout {
+                workspace_id: "w1".into(),
+                tab_id: "w1:t1".into(),
+                focused_pane_id: "w1:p-shell".into(),
+            },
+            TabLayout {
+                workspace_id: "w1".into(),
+                tab_id: "w1:t2".into(),
+                focused_pane_id: "w1:p1".into(),
+            },
+        ],
+    };
+    let mut runtime = Runtime::new(
+        Config {
+            pi_session_dirs: vec![sessions.clone()],
+            tab_name: herdr_agent_context::config::TabNameConfig { enabled: true },
+            ..Config::default()
+        },
+        PathBuf::from("/no-home"),
+        HashMap::new(),
+    );
+    runtime
+        .initialize_tab_names(&state, Path::new("/tmp/herdr-tab-runtime.sock"))
+        .unwrap();
+
+    runtime.reconcile(&mut api).unwrap();
+
+    assert_eq!(api.snapshot_calls, 1);
+    assert_eq!(api.renames, vec![("w1:t2".into(), "Build context".into())]);
+    assert_eq!(api.reports.len(), 1);
+
+    runtime.set_config(Config {
+        pi_session_dirs: vec![sessions],
+        ..Config::default()
+    });
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(
+        api.renames,
+        vec![
+            ("w1:t2".into(), "Build context".into()),
+            ("w1:t2".into(), "2".into()),
+        ]
+    );
+}
+
+#[test]
+fn tab_name_runtime_debounces_focus_without_delaying_metadata() {
+    let temp = tempfile::tempdir().unwrap();
+    let pi_root = temp.path().join("pi");
+    let claude_root = temp.path().join("claude");
+    let claude_project = claude_root.join("-work-claude");
+    let state = temp.path().join("state");
+    fs::create_dir(&pi_root).unwrap();
+    fs::create_dir_all(&claude_project).unwrap();
+    fs::create_dir(&state).unwrap();
+    fs::write(pi_root.join("session.jsonl"), session_text("")).unwrap();
+    let claude_id = "10000000-0000-4000-8000-000000000001";
+    fs::write(
+        claude_project.join(format!("{claude_id}.jsonl")),
+        claude_session_text(claude_id, "/work/claude", "Claude name", "Claude answer"),
+    )
+    .unwrap();
+    let mut api = fake_api();
+    api.agents.push(claude_agent("/work/claude", "w1:p2"));
+    api.process_args
+        .insert("w1:p2".into(), vec!["claude".into()]);
+    api.snapshot = SessionSnapshot {
+        tabs: vec![TabInfo {
+            tab_id: "w1:t1".into(),
+            workspace_id: "w1".into(),
+            number: 1,
+            label: "baseline".into(),
+        }],
+        layouts: vec![TabLayout {
+            workspace_id: "w1".into(),
+            tab_id: "w1:t1".into(),
+            focused_pane_id: "w1:p1".into(),
+        }],
+    };
+    let mut runtime = Runtime::new(
+        Config {
+            pi_session_dirs: vec![pi_root],
+            claude_session_dirs: vec![claude_root],
+            tab_name: herdr_agent_context::config::TabNameConfig { enabled: true },
+            ..Config::default()
+        },
+        PathBuf::from("/no-home"),
+        HashMap::new(),
+    );
+    runtime
+        .initialize_tab_names(&state, Path::new("/tmp/herdr-focus-runtime.sock"))
+        .unwrap();
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(api.renames.last().unwrap().1, "Build context");
+
+    let focus_at = Instant::now();
+    runtime.note_focus(Some("w1:p2"), focus_at);
+    api.snapshot.layouts[0].focused_pane_id = "w1:p2".into();
+    runtime
+        .reconcile_at(&mut api, focus_at + Duration::from_millis(149))
+        .unwrap();
+    assert_eq!(api.renames.len(), 1);
+    assert_eq!(api.reports.len(), 4);
+
+    runtime
+        .reconcile_at(&mut api, focus_at + Duration::from_millis(150))
+        .unwrap();
+    assert_eq!(api.renames.last().unwrap().1, "Claude name");
+    assert_eq!(api.reports.len(), 6);
+}
+
+#[test]
+fn tab_name_workspace_mismatch_never_renames() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = temp.path().join("state");
+    fs::create_dir(&state).unwrap();
+    fs::write(temp.path().join("session.jsonl"), session_text("")).unwrap();
+    let mut api = fake_api();
+    api.agents[0].workspace_id = Some("w2".into());
+    api.snapshot = SessionSnapshot {
+        tabs: vec![TabInfo {
+            tab_id: "w1:t1".into(),
+            workspace_id: "w1".into(),
+            number: 1,
+            label: "1".into(),
+        }],
+        layouts: vec![TabLayout {
+            workspace_id: "w1".into(),
+            tab_id: "w1:t1".into(),
+            focused_pane_id: "w1:p1".into(),
+        }],
+    };
+    let mut runtime = Runtime::new(
+        Config {
+            pi_session_dirs: vec![temp.path().to_owned()],
+            tab_name: herdr_agent_context::config::TabNameConfig { enabled: true },
+            ..Config::default()
+        },
+        PathBuf::from("/no-home"),
+        HashMap::new(),
+    );
+    runtime
+        .initialize_tab_names(&state, Path::new("/tmp/herdr-workspace-mismatch.sock"))
+        .unwrap();
+
+    let status = runtime.reconcile(&mut api).unwrap();
+
+    assert!(status.tab_name_disabled);
+    assert_eq!(api.reports.len(), 1);
+    assert!(api.renames.is_empty());
+}
+
+#[test]
+fn tab_name_topology_error_disables_only_tab_sync() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = temp.path().join("state");
+    fs::create_dir(&state).unwrap();
+    fs::write(temp.path().join("session.jsonl"), session_text("")).unwrap();
+    let mut api = fake_api();
+    api.fail_snapshot_topology = true;
+    let mut runtime = Runtime::new(
+        Config {
+            pi_session_dirs: vec![temp.path().to_owned()],
+            tab_name: herdr_agent_context::config::TabNameConfig { enabled: true },
+            ..Config::default()
+        },
+        PathBuf::from("/no-home"),
+        HashMap::new(),
+    );
+    runtime
+        .initialize_tab_names(&state, Path::new("/tmp/herdr-topology-failure.sock"))
+        .unwrap();
+
+    let status = runtime.reconcile(&mut api).unwrap();
+
+    assert!(status.tab_name_disabled);
+    assert_eq!(api.reports.len(), 1);
+    assert!(api.renames.is_empty());
+}
+
+#[test]
+fn tab_name_state_failure_disables_only_tab_sync() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let state = temp.path().join("state");
+    fs::create_dir(&sessions).unwrap();
+    fs::create_dir(&state).unwrap();
+    fs::write(sessions.join("session.jsonl"), session_text("")).unwrap();
+    let mut api = fake_api();
+    api.snapshot = SessionSnapshot {
+        tabs: vec![TabInfo {
+            tab_id: "w1:t1".into(),
+            workspace_id: "w1".into(),
+            number: 1,
+            label: "1".into(),
+        }],
+        layouts: vec![TabLayout {
+            workspace_id: "w1".into(),
+            tab_id: "w1:t1".into(),
+            focused_pane_id: "w1:p1".into(),
+        }],
+    };
+    let mut runtime = Runtime::new(
+        Config {
+            pi_session_dirs: vec![sessions],
+            tab_name: herdr_agent_context::config::TabNameConfig { enabled: true },
+            ..Config::default()
+        },
+        PathBuf::from("/no-home"),
+        HashMap::new(),
+    );
+    runtime
+        .initialize_tab_names(&state, Path::new("/tmp/herdr-state-failure.sock"))
+        .unwrap();
+    let tab_state_dir = state.join("tab-name");
+    fs::set_permissions(&tab_state_dir, fs::Permissions::from_mode(0o500)).unwrap();
+
+    let status = runtime.reconcile(&mut api).unwrap();
+
+    assert!(status.tab_name_disabled);
+    assert!(api.renames.is_empty());
+    assert_eq!(api.reports.len(), 1);
+    fs::set_permissions(&tab_state_dir, fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+#[test]
+fn tab_name_unknown_focus_deadline_dominates_earlier_known_deadline() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = temp.path().join("state");
+    fs::create_dir(&state).unwrap();
+    fs::write(temp.path().join("session.jsonl"), session_text("")).unwrap();
+    let mut api = fake_api();
+    api.snapshot = SessionSnapshot {
+        tabs: vec![TabInfo {
+            tab_id: "w1:t1".into(),
+            workspace_id: "w1".into(),
+            number: 1,
+            label: "1".into(),
+        }],
+        layouts: vec![TabLayout {
+            workspace_id: "w1".into(),
+            tab_id: "w1:t1".into(),
+            focused_pane_id: "w1:p1".into(),
+        }],
+    };
+    let mut runtime = Runtime::new(
+        Config {
+            pi_session_dirs: vec![temp.path().to_owned()],
+            tab_name: herdr_agent_context::config::TabNameConfig { enabled: true },
+            ..Config::default()
+        },
+        PathBuf::from("/no-home"),
+        HashMap::new(),
+    );
+    runtime
+        .initialize_tab_names(&state, Path::new("/tmp/herdr-mixed-deadlines.sock"))
+        .unwrap();
+    runtime.reconcile(&mut api).unwrap();
+
+    let start = Instant::now();
+    runtime.note_focus(Some("w1:p1"), start);
+    runtime.note_focus(Some("w1:p-unknown"), start + Duration::from_millis(100));
+
+    assert_eq!(
+        runtime.next_tab_deadline(),
+        Some(start + Duration::from_millis(250))
+    );
+    runtime
+        .reconcile_at(&mut api, start + Duration::from_millis(150))
+        .unwrap();
+    assert_eq!(
+        runtime.next_tab_deadline(),
+        Some(start + Duration::from_millis(250))
+    );
+    runtime
+        .reconcile_at(&mut api, start + Duration::from_millis(250))
+        .unwrap();
+    assert_eq!(runtime.next_tab_deadline(), None);
+}
+
+#[test]
+fn tab_name_disable_hides_unowned_focus_deadline() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = temp.path().join("state");
+    fs::create_dir(&state).unwrap();
+    let mut runtime = Runtime::new(
+        Config {
+            tab_name: herdr_agent_context::config::TabNameConfig { enabled: true },
+            ..Config::default()
+        },
+        PathBuf::from("/no-home"),
+        HashMap::new(),
+    );
+    runtime
+        .initialize_tab_names(&state, Path::new("/tmp/herdr-disable-deadline.sock"))
+        .unwrap();
+    runtime.note_focus(Some("w1:p-new"), Instant::now());
+    assert!(runtime.next_tab_deadline().is_some());
+
+    runtime.set_config(Config::default());
+
+    assert_eq!(runtime.next_tab_deadline(), None);
+}
+
+#[test]
+fn tab_name_runtime_is_transport_inert_by_default() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(temp.path().join("session.jsonl"), session_text("")).unwrap();
+    let mut api = fake_api();
+    let mut runtime = runtime_for(temp.path());
+    runtime.note_focus(Some("w1:p1"), Instant::now());
+    assert_eq!(runtime.next_tab_deadline(), None);
+
+    runtime.reconcile(&mut api).unwrap();
+
+    assert_eq!(api.snapshot_calls, 0);
+    assert!(api.renames.is_empty());
+    assert_eq!(api.reports.len(), 1);
+}
+
 fn runtime_for(root: &Path) -> Runtime {
     Runtime::new(
         Config {
@@ -240,8 +608,7 @@ fn claude_authoritative_id_blocks_fallback_until_exact_target_is_valid() {
     let mut api = FakeApi {
         agents: vec![claude],
         process_args: HashMap::from([("w1:p2".into(), vec!["claude".into()])]),
-        reports: Vec::new(),
-        fail_next_clear: false,
+        ..fake_api()
     };
     let mut runtime = Runtime::new(
         Config {
@@ -297,8 +664,7 @@ fn claude_exact_uuid_hint_binds_without_claiming_official_source() {
             "w1:p2".into(),
             vec!["claude".into(), "--session-id".into(), session_id.into()],
         )]),
-        reports: Vec::new(),
-        fail_next_clear: false,
+        ..fake_api()
     };
     let mut runtime = Runtime::new(
         Config {
@@ -358,8 +724,7 @@ fn incomplete_claude_tail_keeps_sticky_binding_and_does_not_refresh() {
     let mut api = FakeApi {
         agents: vec![claude_agent("/work/claude", "w1:p2")],
         process_args: HashMap::from([("w1:p2".into(), vec!["claude".into()])]),
-        reports: Vec::new(),
-        fail_next_clear: false,
+        ..fake_api()
     };
     let mut runtime = Runtime::new(
         Config {
@@ -401,8 +766,7 @@ fn claude_retains_activity_within_a_session_but_not_after_switching() {
     let mut api = FakeApi {
         agents: vec![claude_agent("/work/claude", "w1:p2")],
         process_args: HashMap::from([("w1:p2".into(), vec!["claude".into()])]),
-        reports: Vec::new(),
-        fail_next_clear: false,
+        ..fake_api()
     };
     let mut runtime = Runtime::new(
         Config {
@@ -1039,6 +1403,163 @@ fn listener_restart_uses_a_fresh_monotonic_sequence_epoch() {
     runtime_for(temp.path()).reconcile(&mut api).unwrap();
     let restarted = api.reports.last().unwrap().seq;
     assert!(restarted > first);
+}
+
+#[test]
+fn tab_name_listener_binary_ignores_its_own_rename_event() {
+    let temp = tempfile::tempdir().unwrap();
+    let socket = temp.path().join("herdr.sock");
+    let sessions = temp.path().join("sessions");
+    let config = temp.path().join("config");
+    let state = temp.path().join("state");
+    fs::create_dir(&sessions).unwrap();
+    fs::create_dir(&config).unwrap();
+    fs::create_dir(&state).unwrap();
+    fs::write(sessions.join("session.jsonl"), session_text("")).unwrap();
+    fs::write(config.join("config.toml"), "[tab_name]\nenabled = true\n").unwrap();
+    let listener = UnixListener::bind(&socket).unwrap();
+    let (done_tx, done_rx) = mpsc::channel();
+
+    let server = thread::spawn(move || {
+        let (event_stream, _) = listener.accept().unwrap();
+        let mut event_reader = BufReader::new(event_stream.try_clone().unwrap());
+        let mut event_writer = event_stream;
+        let mut line = String::new();
+        event_reader.read_line(&mut line).unwrap();
+        let subscribe: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(subscribe["method"], "events.subscribe");
+        writeln!(
+            event_writer,
+            "{}",
+            json!({
+                "event":"pane_updated",
+                "data":{"type":"pane_updated","pane":{"pane_id":"w1:p1"}}
+            })
+        )
+        .unwrap();
+        writeln!(
+            event_writer,
+            "{}",
+            json!({"id":subscribe["id"],"result":{"type":"subscription_started"}})
+        )
+        .unwrap();
+        event_writer.flush().unwrap();
+
+        let expected = [
+            "agent.list",
+            "pane.process_info",
+            "pane.report_metadata",
+            "session.snapshot",
+            "tab.rename",
+            "agent.list",
+            "pane.process_info",
+            "pane.report_metadata",
+            "session.snapshot",
+        ];
+        let mut renamed = false;
+        for method in expected {
+            let (rpc_stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(rpc_stream.try_clone().unwrap());
+            let mut writer = rpc_stream;
+            line.clear();
+            reader.read_line(&mut line).unwrap();
+            let request: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(request["method"], method);
+            let result = match method {
+                "agent.list" => json!({
+                    "type":"agent_list",
+                    "agents":[{
+                        "terminal_id":"term-1","workspace_id":"w1","tab_id":"w1:t1",
+                        "agent":"pi","agent_status":"working","cwd":"/work/project",
+                        "foreground_cwd":"/work/project","pane_id":"w1:p1","revision":1
+                    }]
+                }),
+                "pane.process_info" => json!({
+                    "type":"pane_process_info",
+                    "process_info":{"pane_id":"w1:p1","foreground_processes":[
+                        {"pid":1,"name":"pi","argv":["pi"],"argv0":"pi","cmdline":null}
+                    ]}
+                }),
+                "pane.report_metadata" => json!({"type":"pane_metadata_reported"}),
+                "session.snapshot" => json!({
+                    "type":"session_snapshot",
+                    "snapshot":{
+                        "version":"0.8.0","protocol":19,
+                        "tabs":[{
+                            "tab_id":"w1:t1","workspace_id":"w1","number":1,
+                            "label": if renamed { "Build context" } else { "1" },
+                            "focused":true,"pane_count":1,"agent_status":"working"
+                        }],
+                        "layouts":[{
+                            "workspace_id":"w1","tab_id":"w1:t1","focused_pane_id":"w1:p1"
+                        }],
+                        "workspaces":[],"panes":[],"agents":[]
+                    }
+                }),
+                "tab.rename" => {
+                    assert_eq!(request["params"]["label"], "Build context");
+                    renamed = true;
+                    json!({
+                        "type":"tab_info",
+                        "tab":{
+                            "tab_id":"w1:t1","workspace_id":"w1","number":1,
+                            "label":"Build context","focused":true,"pane_count":1,
+                            "agent_status":"working"
+                        }
+                    })
+                }
+                _ => unreachable!(),
+            };
+            if method == "tab.rename" {
+                writeln!(
+                    event_writer,
+                    "{}",
+                    json!({
+                        "event":"tab_renamed",
+                        "data":{
+                            "type":"tab_renamed","tab_id":"w1:t1",
+                            "workspace_id":"w1","label":"Build context"
+                        }
+                    })
+                )
+                .unwrap();
+                event_writer.flush().unwrap();
+            }
+            writeln!(writer, "{}", json!({"id":request["id"],"result":result})).unwrap();
+            writer.flush().unwrap();
+        }
+        done_tx.send(()).unwrap();
+        line.clear();
+        let _ = event_reader.read_line(&mut line);
+    });
+
+    let binary = env!("CARGO_BIN_EXE_herdr-agent-context");
+    let mut child = Command::new(binary)
+        .arg("listen")
+        .env("HERDR_ENV", "1")
+        .env("HERDR_SOCKET_PATH", &socket)
+        .env("HERDR_PLUGIN_CONFIG_DIR", &config)
+        .env("HERDR_PLUGIN_STATE_DIR", &state)
+        .env("PI_CODING_AGENT_SESSION_DIR", &sessions)
+        .env("HOME", temp.path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+
+    done_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    let state_file = fs::read_dir(state.join("tab-name"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let persisted = fs::read_to_string(state_file).unwrap();
+    assert!(!persisted.contains("Build context"));
+    assert!(!persisted.contains("\"s1\""));
+    child.kill().unwrap();
+    child.wait().unwrap();
+    server.join().unwrap();
 }
 
 #[test]

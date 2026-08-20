@@ -1,5 +1,5 @@
 use crate::backend::DisplayView;
-use crate::text::display_line;
+use crate::text::{complete_line, display_line};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -20,7 +20,7 @@ pub struct PiSessionView {
 }
 
 impl PiSessionView {
-    pub fn session_name(&self) -> Option<String> {
+    pub fn session_name_source(&self) -> Option<String> {
         self.explicit_name
             .clone()
             .or_else(|| self.first_user_line.clone())
@@ -28,15 +28,20 @@ impl PiSessionView {
                 self.cwd
                     .file_name()
                     .and_then(|value| value.to_str())
-                    .and_then(display_line)
+                    .and_then(complete_line)
             })
     }
 
+    pub fn session_name(&self) -> Option<String> {
+        self.session_name_source().as_deref().and_then(display_line)
+    }
+
     pub fn display_view(&self) -> DisplayView {
-        let session_name = self.session_name();
+        let tab_name_source = self.session_name_source();
+        let session_name = tab_name_source.as_deref().and_then(display_line);
         DisplayView {
             session_identity: self.session_id.clone(),
-            tab_name_source: session_name.clone(),
+            tab_name_source,
             session_name,
             last_message: self.latest_turn_assistant_line.clone(),
         }
@@ -128,7 +133,7 @@ pub fn parse_session_text(
             .map(ToOwned::to_owned);
         let kind = parse_node_kind(entry);
         if let NodeKind::SessionInfo(Some(name)) = &kind {
-            explicit_name = display_line(name);
+            explicit_name = Some(name.clone());
         }
         nodes.insert(id.to_owned(), Node { parent_id, kind });
         order.push(id.to_owned());
@@ -203,7 +208,7 @@ fn parse_node_kind(entry: &Value) -> NodeKind {
             entry
                 .get("name")
                 .and_then(Value::as_str)
-                .and_then(display_line),
+                .and_then(complete_line),
         ),
         Some("message") => {
             let Some(message) = entry.get("message") else {
@@ -224,8 +229,8 @@ fn parse_node_kind(entry: &Value) -> NodeKind {
 fn user_message_text(content: &Value) -> Option<String> {
     content
         .as_str()
-        .and_then(display_line)
-        .or_else(|| block_text(content, display_line))
+        .and_then(complete_line)
+        .or_else(|| block_text(content, complete_line))
 }
 
 fn assistant_message_text(content: &Value) -> Option<String> {
@@ -267,6 +272,20 @@ mod tests {
         ));
         assert_eq!(view.session_name(), Some("Named session".into()));
         assert_eq!(view.first_user_line, Some("fallback task".into()));
+    }
+
+    #[test]
+    fn preserves_complete_name_source_for_independent_tab_bound() {
+        let title = format!("a{}", "\u{301}".repeat(90));
+        let input = format!(
+            "{}\n{}\n",
+            serde_json::json!({"type":"session","id":"s1","cwd":"/work/project"}),
+            serde_json::json!({"type":"session_info","id":"n1","parentId":null,"name":title})
+        );
+        let display = parse(&input).display_view();
+
+        assert_eq!(display.session_name.as_ref().unwrap().chars().count(), 80);
+        assert_eq!(display.tab_name_source.as_deref(), Some(title.as_str()));
     }
 
     #[test]

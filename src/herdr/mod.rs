@@ -24,6 +24,10 @@ pub trait HerdrApi {
         false
     }
 
+    fn is_tab_topology_error(_error: &Self::Error) -> bool {
+        false
+    }
+
     fn list_agents(&mut self) -> Result<Vec<AgentInfo>, Self::Error>;
     fn process_info(&mut self, pane_id: &str) -> Result<ProcessInfo, Self::Error>;
     fn session_snapshot(&mut self) -> Result<SessionSnapshot, Self::Error>;
@@ -43,6 +47,10 @@ impl HerdrApi for socket::SocketTransport {
 
     fn is_missing_tab_error(error: &Self::Error) -> bool {
         matches!(error, socket::SocketError::Api(code) if code == "tab_not_found")
+    }
+
+    fn is_tab_topology_error(error: &Self::Error) -> bool {
+        matches!(error, socket::SocketError::Json(_))
     }
 
     fn list_agents(&mut self) -> Result<Vec<AgentInfo>, Self::Error> {
@@ -78,6 +86,18 @@ mod tests {
         assert!(
             !<socket::SocketTransport as HerdrApi>::is_missing_tab_error(
                 &socket::SocketError::Api("workspace_not_found".into())
+            )
+        );
+
+        let malformed = serde_json::from_str::<serde_json::Value>("{").unwrap_err();
+        assert!(
+            <socket::SocketTransport as HerdrApi>::is_tab_topology_error(
+                &socket::SocketError::Json(malformed)
+            )
+        );
+        assert!(
+            !<socket::SocketTransport as HerdrApi>::is_tab_topology_error(
+                &socket::SocketError::Api("transient".into())
             )
         );
     }

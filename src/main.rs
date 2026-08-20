@@ -53,7 +53,20 @@ fn run() -> Result<(), String> {
     if initial_invalid {
         eprintln!("herdr-agent-context: invalid plugin config; using defaults");
     }
+    let state_dir = env::var_os("HERDR_PLUGIN_STATE_DIR")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty());
     let mut runtime = Runtime::new(initial_config, home, environment);
+    if let Some(state_dir) = state_dir {
+        if runtime
+            .initialize_tab_names(&state_dir, &socket_path)
+            .is_err()
+        {
+            eprintln!("herdr-agent-context: tab-name synchronization disabled: state unavailable");
+        }
+    } else if runtime.config().tab_name.enabled {
+        eprintln!("herdr-agent-context: tab-name synchronization disabled: state unavailable");
+    }
     listen_forever(&socket_path, watcher.as_mut(), &mut runtime)
 }
 
@@ -71,10 +84,13 @@ fn listen_forever(
                 continue;
             }
         };
-        if let Err(error) = runtime.reconcile(&mut transport) {
-            eprintln!("herdr-agent-context: initial reconciliation failed: {error}");
-            sleep_with_backoff(&mut backoff_ms);
-            continue;
+        match runtime.reconcile(&mut transport) {
+            Ok(status) => report_tab_name_status(status),
+            Err(error) => {
+                eprintln!("herdr-agent-context: initial reconciliation failed: {error}");
+                sleep_with_backoff(&mut backoff_ms);
+                continue;
+            }
         }
 
         let mut schedule = PollSchedule::new(
@@ -82,6 +98,7 @@ fn listen_forever(
             Duration::from_millis(runtime.config().poll_interval_ms),
         );
         loop {
+            let mut immediate_reconcile = false;
             if let Some(watcher) = watcher.as_deref_mut() {
                 match apply_config_reload(runtime, watcher.poll()) {
                     AppliedConfigReload::Updated => {
@@ -89,6 +106,12 @@ fn listen_forever(
                             Instant::now(),
                             Duration::from_millis(runtime.config().poll_interval_ms),
                         );
+                        immediate_reconcile = true;
+                        if runtime.config().tab_name.enabled && !runtime.tab_names_available() {
+                            eprintln!(
+                                "herdr-agent-context: tab-name synchronization disabled: state unavailable"
+                            );
+                        }
                     }
                     AppliedConfigReload::Invalid => {
                         eprintln!(
@@ -99,9 +122,23 @@ fn listen_forever(
                 }
             }
 
-            let event = transport.poll_event(schedule.remaining(Instant::now()));
+            let wait_started = Instant::now();
+            let event = transport.poll_event(next_wait(
+                &schedule,
+                runtime.next_tab_deadline(),
+                wait_started,
+                immediate_reconcile,
+            ));
             let event_reconcile = match event {
-                EventPoll::Event(event) => event.kind != "pane_updated",
+                EventPoll::Event(event)
+                    if event.kind == "pane_focused" || event.kind == "pane.focused" =>
+                {
+                    runtime.note_focus(event.pane_id.as_deref(), Instant::now());
+                    false
+                }
+                EventPoll::Event(event) => {
+                    event_requires_reconcile(&event.kind, runtime.tab_event_reconcile_needed())
+                }
                 EventPoll::Malformed => {
                     eprintln!("herdr-agent-context: skipped malformed Herdr event");
                     false
@@ -111,12 +148,18 @@ fn listen_forever(
             };
             let now = Instant::now();
             let poll_due = schedule.is_due(now);
-            if !event_reconcile && !poll_due {
+            let tab_due = runtime
+                .next_tab_deadline()
+                .is_some_and(|deadline| now >= deadline);
+            if !immediate_reconcile && !event_reconcile && !poll_due && !tab_due {
                 continue;
             }
-            if let Err(error) = runtime.reconcile(&mut transport) {
-                eprintln!("herdr-agent-context: reconciliation failed: {error}");
-                break;
+            match runtime.reconcile_at(&mut transport, now) {
+                Ok(status) => report_tab_name_status(status),
+                Err(error) => {
+                    eprintln!("herdr-agent-context: reconciliation failed: {error}");
+                    break;
+                }
             }
             if poll_due {
                 schedule.reset(
@@ -127,6 +170,22 @@ fn listen_forever(
             }
         }
         sleep_with_backoff(&mut backoff_ms);
+    }
+}
+
+fn event_requires_reconcile(kind: &str, tab_ownership_active: bool) -> bool {
+    match kind {
+        "pane_updated" | "pane.updated" | "pane_focused" | "pane.focused" => false,
+        "tab_created" | "tab.created" | "tab_closed" | "tab.closed" | "tab_renamed"
+        | "tab.renamed" | "tab_moved" | "tab.moved" | "layout_updated" | "layout.updated"
+        | "pane_moved" | "pane.moved" => tab_ownership_active,
+        _ => true,
+    }
+}
+
+fn report_tab_name_status(status: herdr_agent_context::runtime::ReconcileStatus) {
+    if status.tab_name_disabled {
+        eprintln!("herdr-agent-context: tab-name synchronization disabled: state unavailable");
     }
 }
 
@@ -163,6 +222,23 @@ fn sleep_with_backoff(backoff_ms: &mut u64) {
 
 struct PollSchedule {
     deadline: Instant,
+}
+
+fn next_wait(
+    schedule: &PollSchedule,
+    tab_deadline: Option<Instant>,
+    now: Instant,
+    immediate: bool,
+) -> Duration {
+    if immediate {
+        return Duration::ZERO;
+    }
+    tab_deadline
+        .map(|deadline| deadline.saturating_duration_since(now))
+        .map_or_else(
+            || schedule.remaining(now),
+            |tab| tab.min(schedule.remaining(now)),
+        )
 }
 
 impl PollSchedule {
@@ -256,15 +332,42 @@ mod tests {
     }
 
     #[test]
-    fn poll_deadline_is_not_extended_by_events() {
+    fn poll_deadline_is_not_extended_by_events_or_tab_debounce() {
         let start = Instant::now();
         let mut schedule = PollSchedule::new(start, Duration::from_secs(2));
         let original = schedule.deadline;
-        assert!(!schedule.is_due(start + Duration::from_secs(1)));
+        assert_eq!(
+            next_wait(
+                &schedule,
+                Some(start + Duration::from_millis(150)),
+                start,
+                false,
+            ),
+            Duration::from_millis(150)
+        );
+        assert_eq!(next_wait(&schedule, None, start, true), Duration::ZERO);
+        assert!(!schedule.is_due(start + Duration::from_millis(150)));
         assert_eq!(schedule.deadline, original);
         assert!(schedule.is_due(start + Duration::from_secs(2)));
         schedule.reset(start + Duration::from_secs(2), Duration::from_secs(2));
         assert_eq!(schedule.deadline, start + Duration::from_secs(4));
+    }
+
+    #[test]
+    fn tab_only_events_are_inert_without_active_tab_ownership() {
+        for kind in [
+            "tab_renamed",
+            "tab.moved",
+            "tab_closed",
+            "layout.updated",
+            "pane_moved",
+        ] {
+            assert!(!event_requires_reconcile(kind, false));
+            assert!(event_requires_reconcile(kind, true));
+        }
+        assert!(event_requires_reconcile("pane_created", false));
+        assert!(!event_requires_reconcile("pane_updated", true));
+        assert!(!event_requires_reconcile("pane.focused", true));
     }
 
     #[test]

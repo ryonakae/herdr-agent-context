@@ -318,6 +318,8 @@ mod tests {
                 pane_id: id.into(),
                 terminal_id: format!("term-{id}"),
             },
+            workspace_id: Some("w1".into()),
+            tab_id: Some("w1:t1".into()),
             agent: "pi".into(),
             cwd: "/work".into(),
             terminal_title: None,

@@ -209,7 +209,7 @@ Writes use a same-directory temporary file, owner-only permissions, flush/sync a
 - [x] Task 1: Align Claude's shared sidebar/tab display title and Unicode bounding contracts.
 - [x] Task 2: Add opt-in configuration and the Herdr topology/rename/event transport contract.
 - [x] Task 3: Implement durable tab ownership, manual overrides, restoration, and crash recovery.
-- [ ] Task 4: Integrate focus-debounced tab synchronization with runtime and listener lifecycle.
+- [x] Task 4: Integrate focus-debounced tab synchronization with runtime and listener lifecycle.
 - [ ] Task 5: Publish the user-visible contract and complete automated and disposable-session validation.
 
 Implementation-time minor file changes or internal naming differences must be recorded in the relevant task. Ask the user before changing requirements, Out of Scope, configuration schema, title precedence, manual-override scope, state format/privacy boundary, compatibility claims, or release contracts.
@@ -427,6 +427,13 @@ Implementation-time minor file changes or internal naming differences must be re
 - Expected: config reload, debounce scheduling, absolute deadline, lock, and existing binary unit tests pass.
 - Run: `cargo test --test listener listener_binary --locked`
 - Expected: subprocess reconnect/full-sync/duplicate-owner tests pass with state-dir handling and no metadata regression.
+
+**Implementation record:**
+- Runtime now initializes socket-scoped state, maps resolved/unresolved/failed backend outcomes to authoritative tab topology, validates tab/layout/pane workspace ownership, applies/finalizes durable rename effects, and isolates state/topology failures from metadata.
+- Main now loads `HERDR_PLUGIN_STATE_DIR`, schedules known/unknown focus deadlines without moving the absolute poll deadline, reconciles config changes immediately, gates tab-only events when default-off, and reports content-free tab-only failures.
+- Pi now preserves a complete normalized name source independently from its 80-scalar sidebar value. Snapshot arrays are mandatory; shape errors are classified separately from transport failures.
+- Focused runtime/scheduler tests and an enabled listener subprocess cover background tabs, Pi/Claude focus debounce, default-off inactivity, config disable restoration, workspace/shape/state isolation, RPC-pre-ack rename events, and feedback-loop prevention.
+- Full validation passed. Task-level reviews found workspace/snapshot/source/default-off/deadline issues; all blocking/high findings were fixed and final re-review approved the result.
 
 ### Task 5: Public Contract, Live Smoke, and Full Validation
 

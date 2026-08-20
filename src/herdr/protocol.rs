@@ -104,9 +104,7 @@ pub struct TabLayout {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 pub struct SessionSnapshot {
-    #[serde(default)]
     pub tabs: Vec<TabInfo>,
-    #[serde(default)]
     pub layouts: Vec<TabLayout>,
 }
 
@@ -319,6 +317,14 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(tab.label, "title");
+
+        assert!(
+            parse_session_snapshot(json!({
+                "type":"session_snapshot",
+                "snapshot":{"version":"0.8.0","protocol":19,"tabs":[]}
+            }))
+            .is_err()
+        );
     }
 
     #[test]

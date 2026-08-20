@@ -44,6 +44,8 @@ impl ProcessCommand {
 #[derive(Clone, Eq, PartialEq)]
 pub struct PaneInput {
     pub key: PaneKey,
+    pub workspace_id: Option<String>,
+    pub tab_id: Option<String>,
     pub agent: String,
     pub cwd: PathBuf,
     pub terminal_title: Option<String>,
