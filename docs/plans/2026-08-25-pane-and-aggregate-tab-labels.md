@@ -142,7 +142,7 @@ Ownership state follows these invariants:
 
 - [x] Task 1: Define the 20-column, configuration, and Herdr pane-label contracts
 - [x] Task 2: Convert tab ownership from focus selection to ordered composition ownership
-- [ ] Task 3: Add durable session-scoped pane label ownership
+- [x] Task 3: Add durable session-scoped pane label ownership
 - [ ] Task 4: Reconcile pane and aggregate tab labels without metadata loops
 - [ ] Task 5: Publish the user contract and complete repository validation
 
@@ -312,6 +312,13 @@ Implementers must update this list only after each task's validation succeeds. R
 
 - Pane ownership and secure persistence tests cover nullable baselines, per-session overrides, cleanup, and crash recovery.
 - State fixtures contain manual text only where allowed and contain no plaintext generated title, session identity, or socket path.
+
+**Implementation record (2026-08-25):**
+
+- Created `src/pane_name/mod.rs` and `src/pane_name/state.rs`; exposed the module from `src/lib.rs`.
+- Red evidence: the manager API initially did not exist; restart tests then exposed missing retries for persisted baseline targets during known failures.
+- Green evidence: 18 pane ownership tests, 12 pane state/security tests, 17 tab state regression tests, formatting, clippy with warnings denied, and whitespace checks passed. Independent review found no blocking/high issue.
+- Runtime wiring remains isolated to Task 4 as planned. The manager uses nullable labels and a separate `pane-name` state namespace without sharing tab failure state.
 
 **Validation:**
 

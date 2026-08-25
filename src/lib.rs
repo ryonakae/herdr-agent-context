@@ -2,6 +2,7 @@ pub mod backend;
 pub mod claude;
 pub mod config;
 pub mod herdr;
+pub mod pane_name;
 pub mod pi;
 pub mod runtime;
 pub mod tab_name;
