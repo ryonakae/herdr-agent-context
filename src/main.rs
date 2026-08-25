@@ -57,15 +57,26 @@ fn run() -> Result<(), String> {
         .map(PathBuf::from)
         .filter(|path| !path.as_os_str().is_empty());
     let mut runtime = Runtime::new(initial_config, home, environment);
-    if let Some(state_dir) = state_dir {
+    if let Some(state_dir) = state_dir.as_deref() {
         if runtime
-            .initialize_tab_names(&state_dir, &socket_path)
+            .initialize_tab_names(state_dir, &socket_path)
             .is_err()
         {
             eprintln!("herdr-agent-context: tab-name synchronization disabled: state unavailable");
         }
-    } else if runtime.config().tab_name.enabled {
-        eprintln!("herdr-agent-context: tab-name synchronization disabled: state unavailable");
+        if runtime
+            .initialize_pane_names(state_dir, &socket_path)
+            .is_err()
+        {
+            eprintln!("herdr-agent-context: pane-name synchronization disabled: state unavailable");
+        }
+    } else {
+        if runtime.config().tab_name.enabled {
+            eprintln!("herdr-agent-context: tab-name synchronization disabled: state unavailable");
+        }
+        if runtime.config().pane_name.enabled {
+            eprintln!("herdr-agent-context: pane-name synchronization disabled: state unavailable");
+        }
     }
     listen_forever(&socket_path, watcher.as_mut(), &mut runtime)
 }
@@ -86,7 +97,7 @@ fn listen_forever(
         };
         runtime.reset_tab_event_expectations();
         match runtime.reconcile(&mut transport) {
-            Ok(status) => report_tab_name_status(status),
+            Ok(status) => report_naming_status(status),
             Err(error) => {
                 eprintln!("herdr-agent-context: initial reconciliation failed: {error}");
                 sleep_with_backoff(&mut backoff_ms);
@@ -113,6 +124,11 @@ fn listen_forever(
                                 "herdr-agent-context: tab-name synchronization disabled: state unavailable"
                             );
                         }
+                        if runtime.config().pane_name.enabled && !runtime.pane_names_available() {
+                            eprintln!(
+                                "herdr-agent-context: pane-name synchronization disabled: state unavailable"
+                            );
+                        }
                     }
                     AppliedConfigReload::Invalid => {
                         eprintln!(
@@ -134,7 +150,7 @@ fn listen_forever(
                     runtime.tab_event_reconcile_needed()
                 }
                 EventPoll::Event(event) => {
-                    event_requires_reconcile(&event.kind, runtime.tab_event_reconcile_needed())
+                    event_requires_reconcile(&event.kind, runtime.naming_ownership_active())
                 }
                 EventPoll::Malformed => {
                     eprintln!("herdr-agent-context: skipped malformed Herdr event");
@@ -149,7 +165,7 @@ fn listen_forever(
                 continue;
             }
             match runtime.reconcile_at(&mut transport, now) {
-                Ok(status) => report_tab_name_status(status),
+                Ok(status) => report_naming_status(status),
                 Err(error) => {
                     eprintln!("herdr-agent-context: reconciliation failed: {error}");
                     break;
@@ -167,19 +183,22 @@ fn listen_forever(
     }
 }
 
-fn event_requires_reconcile(kind: &str, tab_ownership_active: bool) -> bool {
+fn event_requires_reconcile(kind: &str, naming_ownership_active: bool) -> bool {
     match kind {
         "pane_updated" | "pane.updated" | "pane_focused" | "pane.focused" => false,
         "tab_created" | "tab.created" | "tab_closed" | "tab.closed" | "tab_renamed"
         | "tab.renamed" | "tab_moved" | "tab.moved" | "layout_updated" | "layout.updated"
-        | "pane_moved" | "pane.moved" => tab_ownership_active,
+        | "pane_moved" | "pane.moved" => naming_ownership_active,
         _ => true,
     }
 }
 
-fn report_tab_name_status(status: herdr_agent_context::runtime::ReconcileStatus) {
+fn report_naming_status(status: herdr_agent_context::runtime::ReconcileStatus) {
     if status.tab_name_disabled {
         eprintln!("herdr-agent-context: tab-name synchronization disabled: state unavailable");
+    }
+    if status.pane_name_disabled {
+        eprintln!("herdr-agent-context: pane-name synchronization disabled: state unavailable");
     }
 }
 
@@ -301,7 +320,8 @@ mod tests {
                 "metadata_ttl_ms = 12000\n",
                 "[agents.pi]\nsession_dirs = [\"/pi\"]\n",
                 "[agents.claude]\nsession_dirs = [\"/claude\"]\n",
-                "[tab_name]\nenabled = true\n"
+                "[tab_name]\nenabled = true\n",
+                "[pane_name]\nenabled = true\n"
             ),
             Path::new("/home/me"),
         )
@@ -314,6 +334,7 @@ mod tests {
         );
         assert_eq!(runtime.config(), &config);
         assert!(runtime.config().tab_name.enabled);
+        assert!(runtime.config().pane_name.enabled);
     }
 
     #[test]
@@ -331,7 +352,7 @@ mod tests {
     }
 
     #[test]
-    fn tab_only_events_are_inert_without_active_tab_ownership() {
+    fn naming_topology_events_require_either_active_owner() {
         for kind in [
             "tab_renamed",
             "tab.moved",

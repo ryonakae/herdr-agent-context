@@ -138,18 +138,20 @@ herdr agent prompt context_claude "Reply with a short synthetic Claude status." 
 - [x] Invalid plugin config keeps the previous timing and both agents' roots.
 - [x] Plugin logs contain no synthetic title, prompt, or assistant text.
 
-## Optional tab-label behavior
+## Optional tab and pane label behavior
 
-Keep the default-off check separate from the opt-in checks. For the opt-in smoke, back up the plugin's `config.toml`, add `[tab_name] enabled = true`, and restore the exact original file before cleanup. Use only the disposable named session and synthetic agents created above.
+Keep the default-off check separate from the opt-in checks. For the opt-in smoke, back up the plugin's `config.toml`, enable `[tab_name]` and `[pane_name]` independently and together, then restore the exact original file before cleanup. Use only the disposable named session and synthetic agents created above.
 
-- [x] With `[tab_name]` omitted, the listener sends no `session.snapshot` or `tab.rename` request and tab-only events do not refresh metadata.
+- [x] With both naming tables omitted, the listener sends no `session.snapshot`, `tab.rename`, or `pane.rename` request and naming-only events do not refresh metadata.
 - [x] Generated components use the Pi name or verified Claude title, preserve grapheme clusters, and occupy at most 20 terminal columns; the aggregate retains every component joined with ` + `.
 - [x] Background tabs follow visual pane order (top to bottom, then left to right); focus changes cause no rename and do not move the absolute poll deadline.
 - [x] Shell, unsupported, and untitled panes contribute nothing without hiding resolved panes in the same tab.
 - [x] A manual rename suppresses only the current ordered session composition. Another composition can acquire the tab, and returning restores the exact manual label.
 - [x] Pane moves recompute source and destination aggregates while keeping baselines and overrides tab-local. Closing a tab removes its ownership state.
-- [x] Setting `enabled = false` restores the latest baseline. An inferred numeric baseline uses the current workspace-local position after reordering.
-- [x] State and topology failures stop tab synchronization without blocking sidebar metadata. State files contain manual labels but no plaintext generated title, session identity, or socket path.
+- [x] Each generated pane label uses its own 20-column session title; manual rename and clear override only that pane's current session and never change the tab aggregate.
+- [x] Pane session and terminal replacement, move, close, listener restart, and `[pane_name] enabled = false` restore or recompute the exact owned label.
+- [x] Setting either naming feature to `false` restores its latest baseline. An inferred numeric tab baseline uses the current workspace-local position after reordering.
+- [x] Pane and tab state failures disable only their own synchronizer without blocking the other synchronizer or sidebar metadata. State files contain manual labels but no plaintext generated title, session identity, terminal/binding generation, or socket path.
 - [x] Live: Pi and Claude generated/custom labels, focus switching, shell retention, manual override, config disable, and listener restart match the rules above in an isolated disposable Herdr session.
 - [x] Live: after the selected Pi process exits, the tab restores the exact baseline captured before acquisition.
 - [x] Live: force-stopping the listener leaves the generated custom label; restarting and then setting `enabled = false` restores the saved numeric baseline.

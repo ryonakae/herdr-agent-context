@@ -143,7 +143,7 @@ Ownership state follows these invariants:
 - [x] Task 1: Define the 20-column, configuration, and Herdr pane-label contracts
 - [x] Task 2: Convert tab ownership from focus selection to ordered composition ownership
 - [x] Task 3: Add durable session-scoped pane label ownership
-- [ ] Task 4: Reconcile pane and aggregate tab labels without metadata loops
+- [x] Task 4: Reconcile pane and aggregate tab labels without metadata loops
 - [ ] Task 5: Publish the user contract and complete repository validation
 
 Implementers must update this list only after each task's validation succeeds. Record minor file changes or implementation differences in the relevant task. Ask the user before changing requirements, Out of Scope, or public contracts.
@@ -371,6 +371,13 @@ Implementers must update this list only after each task's validation succeeds. R
 
 - Runtime and listener integration tests prove stable focus-independent tabs, independently owned panes, no metadata loop, and independent disable paths.
 - No focus-debounce scheduler API or test remains.
+
+**Implementation record (2026-08-25):**
+
+- Changed `src/runtime.rs`, `src/main.rs`, `tests/listener.rs`, `README.md`, `docs/release-checklist.md`, and `herdr-plugin.toml`.
+- Red evidence: new pane-only, combined-manager, and manual-pane integration tests failed to compile because `Runtime::initialize_pane_names` and pane reconciliation were absent.
+- Green evidence: 47 listener tests, 2 shared-topology tests, 18 pane manager tests, 32 tab manager tests, 6 binary tests, formatting, clippy with warnings denied, and whitespace checks passed. Independent review found no blocking/high issue.
+- Both managers now consume one validated snapshot, keep independent state-disable status, and preserve `pane_updated`/focus no-loop behavior. Missing resources complete cleanup; transient RPC errors remain retryable.
 
 **Validation:**
 

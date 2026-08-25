@@ -30,6 +30,7 @@ struct Report {
 
 #[derive(Debug)]
 enum FakeError {
+    MissingPane,
     Transient,
     Topology,
 }
@@ -44,10 +45,16 @@ struct FakeApi {
     pane_renames: Vec<(String, Option<String>)>,
     reports: Vec<Report>,
     fail_next_clear: bool,
+    fail_next_pane_rename: bool,
+    miss_next_pane_rename: bool,
 }
 
 impl HerdrApi for FakeApi {
     type Error = FakeError;
+
+    fn is_missing_pane_error(error: &Self::Error) -> bool {
+        matches!(error, FakeError::MissingPane)
+    }
 
     fn is_tab_topology_error(error: &Self::Error) -> bool {
         matches!(error, FakeError::Topology)
@@ -95,6 +102,14 @@ impl HerdrApi for FakeApi {
         pane_id: &str,
         label: Option<&str>,
     ) -> Result<PaneLabelInfo, Self::Error> {
+        if self.fail_next_pane_rename {
+            self.fail_next_pane_rename = false;
+            return Err(FakeError::Transient);
+        }
+        if self.miss_next_pane_rename {
+            self.miss_next_pane_rename = false;
+            return Err(FakeError::MissingPane);
+        }
         let label = label.map(ToOwned::to_owned);
         self.pane_renames.push((pane_id.to_owned(), label.clone()));
         if let Some(pane) = self
@@ -199,6 +214,8 @@ fn fake_api() -> FakeApi {
         pane_renames: Vec::new(),
         reports: Vec::new(),
         fail_next_clear: false,
+        fail_next_pane_rename: false,
+        miss_next_pane_rename: false,
     }
 }
 
@@ -226,6 +243,19 @@ fn pi_tab_name_config(root: PathBuf) -> Config {
     Config {
         pi_session_dirs: vec![root],
         tab_name: herdr_agent_context::config::TabNameConfig { enabled: true },
+        ..Config::default()
+    }
+}
+
+fn pi_naming_config(root: PathBuf, tab_enabled: bool, pane_enabled: bool) -> Config {
+    Config {
+        pi_session_dirs: vec![root],
+        tab_name: herdr_agent_context::config::TabNameConfig {
+            enabled: tab_enabled,
+        },
+        pane_name: herdr_agent_context::config::PaneNameConfig {
+            enabled: pane_enabled,
+        },
         ..Config::default()
     }
 }
@@ -420,6 +450,7 @@ fn tab_name_runtime_uses_layout_order_and_ignores_focus() {
             pi_session_dirs: vec![pi_root],
             claude_session_dirs: vec![claude_root],
             tab_name: herdr_agent_context::config::TabNameConfig { enabled: true },
+            pane_name: herdr_agent_context::config::PaneNameConfig { enabled: true },
             ..Config::default()
         },
         PathBuf::from("/no-home"),
@@ -428,11 +459,22 @@ fn tab_name_runtime_uses_layout_order_and_ignores_focus() {
     runtime
         .initialize_tab_names(&state, Path::new("/tmp/herdr-layout-runtime.sock"))
         .unwrap();
+    runtime
+        .initialize_pane_names(&state, Path::new("/tmp/herdr-layout-runtime.sock"))
+        .unwrap();
     runtime.reconcile(&mut api).unwrap();
     assert_eq!(
         api.renames,
         vec![("w1:t1".into(), "Claude name + Build context".into())]
     );
+    assert_eq!(
+        api.pane_renames,
+        vec![
+            ("w1:p1".into(), Some("Build context".into())),
+            ("w1:p2".into(), Some("Claude name".into())),
+        ]
+    );
+    assert_eq!(api.snapshot_calls, 1);
 
     api.snapshot.layouts[0].focused_pane_id = "stale-focus-value".into();
     runtime.reconcile(&mut api).unwrap();
@@ -504,6 +546,7 @@ fn tab_name_runtime_recomposes_three_panes_across_add_close_move_and_swap() {
         Config {
             claude_session_dirs: vec![root],
             tab_name: herdr_agent_context::config::TabNameConfig { enabled: true },
+            pane_name: herdr_agent_context::config::PaneNameConfig { enabled: true },
             ..Config::default()
         },
         PathBuf::from("/no-home"),
@@ -512,9 +555,13 @@ fn tab_name_runtime_recomposes_three_panes_across_add_close_move_and_swap() {
     runtime
         .initialize_tab_names(&state, Path::new("/tmp/herdr-lifecycle-runtime.sock"))
         .unwrap();
+    runtime
+        .initialize_pane_names(&state, Path::new("/tmp/herdr-lifecycle-runtime.sock"))
+        .unwrap();
 
     runtime.reconcile(&mut api).unwrap();
     assert_eq!(api.renames.last().unwrap().1, "Duplicate + Duplicate");
+    assert_eq!(api.pane_renames.len(), 2);
 
     api.agents.push(p3);
     api.snapshot.layouts[0]
@@ -528,6 +575,7 @@ fn tab_name_runtime_recomposes_three_panes_across_add_close_move_and_swap() {
         api.renames.last().unwrap().1,
         "Duplicate + Third + Duplicate"
     );
+    assert_eq!(api.pane_renames.len(), 3);
 
     api.agents.retain(|agent| agent.pane_id != "w1:p2");
     api.snapshot.layouts[0]
@@ -611,6 +659,7 @@ fn tab_name_runtime_recomposes_three_panes_across_add_close_move_and_swap() {
     api.snapshot.layouts[0].panes = vec![layout_pane("w1:p3", 40, 0), layout_pane("w1:p1", 0, 0)];
     runtime.reconcile(&mut api).unwrap();
     assert_eq!(api.renames.last().unwrap().1, "Duplicate + Third");
+    assert_eq!(api.pane_renames.len(), 3);
 }
 
 #[test]
@@ -807,6 +856,361 @@ fn tab_name_runtime_restores_manual_event_overwritten_by_plugin_rpc() {
     runtime.reconcile(&mut api).unwrap();
 
     assert_eq!(api.renames.last().unwrap().1, "manual-race");
+}
+
+#[test]
+fn naming_runtime_uses_one_snapshot_for_each_enabled_feature_combination() {
+    for (tab_enabled, pane_enabled) in [(false, false), (false, true), (true, false), (true, true)]
+    {
+        let temp = tempfile::tempdir().unwrap();
+        let sessions = temp.path().join("sessions");
+        let state = temp.path().join("state");
+        fs::create_dir(&sessions).unwrap();
+        fs::create_dir(&state).unwrap();
+        fs::write(sessions.join("session.jsonl"), session_text("")).unwrap();
+        let socket = temp.path().join("herdr.sock");
+        let mut runtime = Runtime::new(
+            pi_naming_config(sessions, tab_enabled, pane_enabled),
+            PathBuf::from("/no-home"),
+            HashMap::new(),
+        );
+        runtime.initialize_tab_names(&state, &socket).unwrap();
+        runtime.initialize_pane_names(&state, &socket).unwrap();
+        let mut api = single_pi_tab_api("baseline");
+
+        runtime.reconcile(&mut api).unwrap();
+
+        assert_eq!(api.snapshot_calls, usize::from(tab_enabled || pane_enabled));
+        assert_eq!(api.renames.len(), usize::from(tab_enabled));
+        assert_eq!(api.pane_renames.len(), usize::from(pane_enabled));
+    }
+}
+
+#[test]
+fn pane_runtime_adopts_manual_rename_and_clear_on_periodic_snapshots() {
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let state = temp.path().join("state");
+    fs::create_dir(&sessions).unwrap();
+    fs::create_dir(&state).unwrap();
+    fs::write(sessions.join("session.jsonl"), session_text("")).unwrap();
+    let mut runtime = Runtime::new(
+        pi_naming_config(sessions, false, true),
+        PathBuf::from("/no-home"),
+        HashMap::new(),
+    );
+    runtime
+        .initialize_pane_names(&state, Path::new("/tmp/herdr-pane-manual-runtime.sock"))
+        .unwrap();
+    let mut api = single_pi_tab_api("baseline");
+    api.snapshot.panes[0].label = Some("pane baseline".into());
+
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(
+        api.pane_renames,
+        vec![("w1:p1".into(), Some("Build context".into()))]
+    );
+
+    api.snapshot.panes[0].label = Some("manual pane".into());
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(api.pane_renames.len(), 1);
+
+    api.snapshot.panes[0].label = None;
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(api.pane_renames.len(), 1);
+}
+
+#[test]
+fn pane_runtime_propagates_transient_rename_failures_and_retries() {
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let state = temp.path().join("state");
+    fs::create_dir(&sessions).unwrap();
+    fs::create_dir(&state).unwrap();
+    fs::write(sessions.join("session.jsonl"), session_text("")).unwrap();
+    let mut runtime = Runtime::new(
+        pi_naming_config(sessions, false, true),
+        PathBuf::from("/no-home"),
+        HashMap::new(),
+    );
+    runtime
+        .initialize_pane_names(&state, Path::new("/tmp/herdr-pane-transient.sock"))
+        .unwrap();
+    let mut api = single_pi_tab_api("baseline");
+    api.fail_next_pane_rename = true;
+
+    assert!(runtime.reconcile(&mut api).is_err());
+    assert!(runtime.pane_names_available());
+    runtime.reconcile(&mut api).unwrap();
+
+    assert_eq!(
+        api.pane_renames,
+        vec![("w1:p1".into(), Some("Build context".into()))]
+    );
+}
+
+#[test]
+fn missing_pane_completes_owned_cleanup_without_another_snapshot() {
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let state = temp.path().join("state");
+    fs::create_dir(&sessions).unwrap();
+    fs::create_dir(&state).unwrap();
+    fs::write(sessions.join("session.jsonl"), session_text("")).unwrap();
+    let mut runtime = Runtime::new(
+        pi_naming_config(sessions.clone(), false, true),
+        PathBuf::from("/no-home"),
+        HashMap::new(),
+    );
+    runtime
+        .initialize_pane_names(&state, Path::new("/tmp/herdr-pane-missing-runtime.sock"))
+        .unwrap();
+    let mut api = single_pi_tab_api("baseline");
+    runtime.reconcile(&mut api).unwrap();
+
+    runtime.set_config(pi_naming_config(sessions, false, false));
+    api.miss_next_pane_rename = true;
+    runtime.reconcile(&mut api).unwrap();
+    let snapshots_after_cleanup = api.snapshot_calls;
+    runtime.reconcile(&mut api).unwrap();
+
+    assert_eq!(api.snapshot_calls, snapshots_after_cleanup);
+    assert!(runtime.pane_names_available());
+}
+
+#[test]
+fn malformed_shared_topology_disables_both_naming_managers_after_metadata() {
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let state = temp.path().join("state");
+    fs::create_dir(&sessions).unwrap();
+    fs::create_dir(&state).unwrap();
+    fs::write(sessions.join("session.jsonl"), session_text("")).unwrap();
+    let socket = Path::new("/tmp/herdr-shared-topology.sock");
+    let mut runtime = Runtime::new(
+        pi_naming_config(sessions, true, true),
+        PathBuf::from("/no-home"),
+        HashMap::new(),
+    );
+    runtime.initialize_tab_names(&state, socket).unwrap();
+    runtime.initialize_pane_names(&state, socket).unwrap();
+    let mut api = single_pi_tab_api("baseline");
+    api.snapshot.layouts[0].panes[0].rect.width = 0;
+
+    let status = runtime.reconcile(&mut api).unwrap();
+
+    assert!(status.tab_name_disabled);
+    assert!(status.pane_name_disabled);
+    assert!(!runtime.tab_names_available());
+    assert!(!runtime.pane_names_available());
+    assert_eq!(api.reports.len(), 1);
+    assert!(api.renames.is_empty());
+    assert!(api.pane_renames.is_empty());
+}
+
+#[test]
+fn pane_state_failure_disables_only_pane_naming() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let state = temp.path().join("state");
+    fs::create_dir(&sessions).unwrap();
+    fs::create_dir(&state).unwrap();
+    fs::write(sessions.join("session.jsonl"), session_text("")).unwrap();
+    let socket = Path::new("/tmp/herdr-pane-state-failure.sock");
+    let mut runtime = Runtime::new(
+        pi_naming_config(sessions, true, true),
+        PathBuf::from("/no-home"),
+        HashMap::new(),
+    );
+    runtime.initialize_tab_names(&state, socket).unwrap();
+    runtime.initialize_pane_names(&state, socket).unwrap();
+    let pane_state_dir = state.join("pane-name");
+    fs::set_permissions(&pane_state_dir, fs::Permissions::from_mode(0o500)).unwrap();
+    let mut api = single_pi_tab_api("baseline");
+
+    let status = runtime.reconcile(&mut api).unwrap();
+
+    assert!(!status.tab_name_disabled);
+    assert!(status.pane_name_disabled);
+    assert!(runtime.tab_names_available());
+    assert!(!runtime.pane_names_available());
+    assert_eq!(api.renames, vec![("w1:t1".into(), "Build context".into())]);
+    assert!(api.pane_renames.is_empty());
+    assert_eq!(api.reports.len(), 1);
+    fs::set_permissions(&pane_state_dir, fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+#[test]
+fn pane_runtime_restart_and_config_disable_restore_the_exact_baseline() {
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let state = temp.path().join("state");
+    fs::create_dir(&sessions).unwrap();
+    fs::create_dir(&state).unwrap();
+    fs::write(sessions.join("session.jsonl"), session_text("")).unwrap();
+    let socket = Path::new("/tmp/herdr-pane-runtime-restart.sock");
+    let config = || pi_naming_config(sessions.clone(), false, true);
+    let mut api = single_pi_tab_api("baseline");
+    api.snapshot.panes[0].label = Some("pane baseline".into());
+    let mut runtime = Runtime::new(config(), PathBuf::from("/no-home"), HashMap::new());
+    runtime.initialize_pane_names(&state, socket).unwrap();
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(api.pane_renames.len(), 1);
+    drop(runtime);
+
+    let mut restarted = Runtime::new(config(), PathBuf::from("/no-home"), HashMap::new());
+    restarted.initialize_pane_names(&state, socket).unwrap();
+    restarted.reconcile(&mut api).unwrap();
+    assert_eq!(api.pane_renames.len(), 1);
+
+    restarted.set_config(pi_naming_config(sessions, false, false));
+    restarted.reconcile(&mut api).unwrap();
+    assert_eq!(
+        api.pane_renames.last(),
+        Some(&("w1:p1".into(), Some("pane baseline".into())))
+    );
+    let snapshots_after_cleanup = api.snapshot_calls;
+    restarted.reconcile(&mut api).unwrap();
+    assert_eq!(api.snapshot_calls, snapshots_after_cleanup);
+}
+
+#[test]
+fn malformed_manager_state_isolated_from_the_other_manager_and_sidebar() {
+    for corrupt_pane_state in [true, false] {
+        let temp = tempfile::tempdir().unwrap();
+        let sessions = temp.path().join("sessions");
+        let state = temp.path().join("state");
+        fs::create_dir(&sessions).unwrap();
+        fs::create_dir(&state).unwrap();
+        fs::write(sessions.join("session.jsonl"), session_text("")).unwrap();
+        let socket = temp.path().join("herdr.sock");
+        let mut api = single_pi_tab_api("baseline");
+        let mut owner = Runtime::new(
+            pi_naming_config(sessions.clone(), !corrupt_pane_state, corrupt_pane_state),
+            PathBuf::from("/no-home"),
+            HashMap::new(),
+        );
+        if corrupt_pane_state {
+            owner.initialize_pane_names(&state, &socket).unwrap();
+        } else {
+            owner.initialize_tab_names(&state, &socket).unwrap();
+        }
+        owner.reconcile(&mut api).unwrap();
+        drop(owner);
+
+        let namespace = if corrupt_pane_state {
+            "pane-name"
+        } else {
+            "tab-name"
+        };
+        let state_file = fs::read_dir(state.join(namespace))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        fs::write(state_file, "malformed").unwrap();
+
+        let mut restarted = Runtime::new(
+            pi_naming_config(sessions, true, true),
+            PathBuf::from("/no-home"),
+            HashMap::new(),
+        );
+        if corrupt_pane_state {
+            assert!(restarted.initialize_pane_names(&state, &socket).is_err());
+            restarted.initialize_tab_names(&state, &socket).unwrap();
+        } else {
+            assert!(restarted.initialize_tab_names(&state, &socket).is_err());
+            restarted.initialize_pane_names(&state, &socket).unwrap();
+        }
+        let reports_before = api.reports.len();
+        let tab_renames_before = api.renames.len();
+        let pane_renames_before = api.pane_renames.len();
+
+        restarted.reconcile(&mut api).unwrap();
+
+        assert_eq!(api.reports.len(), reports_before + 1);
+        if corrupt_pane_state {
+            assert_eq!(api.renames.len(), tab_renames_before + 1);
+            assert_eq!(api.pane_renames.len(), pane_renames_before);
+        } else {
+            assert_eq!(api.renames.len(), tab_renames_before);
+            assert_eq!(api.pane_renames.len(), pane_renames_before + 1);
+        }
+    }
+}
+
+#[test]
+fn pane_runtime_scopes_manual_override_to_session_and_releases_replaced_terminal() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("claude");
+    let project = root.join("-work-claude");
+    let state = temp.path().join("state");
+    fs::create_dir_all(&project).unwrap();
+    fs::create_dir(&state).unwrap();
+    let first_id = "10000000-0000-4000-8000-000000000001";
+    let second_id = "10000000-0000-4000-8000-000000000002";
+    let first_path = project.join(format!("{first_id}.jsonl"));
+    fs::write(
+        &first_path,
+        claude_session_text(first_id, "/work/claude", "First", "Answer"),
+    )
+    .unwrap();
+    fs::write(
+        project.join(format!("{second_id}.jsonl")),
+        claude_session_text(second_id, "/work/claude", "Second", "Answer"),
+    )
+    .unwrap();
+    let mut api = single_pi_tab_api("baseline");
+    api.agents = vec![claude_agent("/work/claude", "w1:p1")];
+    api.process_args.insert(
+        "w1:p1".into(),
+        vec!["claude".into(), "--session-id".into(), first_id.into()],
+    );
+    api.snapshot.panes[0].label = Some("pane baseline".into());
+    let mut runtime = Runtime::new(
+        Config {
+            claude_session_dirs: vec![root],
+            pane_name: herdr_agent_context::config::PaneNameConfig { enabled: true },
+            ..Config::default()
+        },
+        PathBuf::from("/no-home"),
+        HashMap::new(),
+    );
+    runtime
+        .initialize_pane_names(&state, Path::new("/tmp/herdr-pane-session-switch.sock"))
+        .unwrap();
+
+    runtime.reconcile(&mut api).unwrap();
+    api.snapshot.panes[0].label = Some("manual first".into());
+    runtime.reconcile(&mut api).unwrap();
+    api.process_args.insert(
+        "w1:p1".into(),
+        vec!["claude".into(), "--session-id".into(), second_id.into()],
+    );
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(
+        api.pane_renames.last(),
+        Some(&("w1:p1".into(), Some("Second".into())))
+    );
+    api.process_args.insert(
+        "w1:p1".into(),
+        vec!["claude".into(), "--session-id".into(), first_id.into()],
+    );
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(
+        api.pane_renames.last(),
+        Some(&("w1:p1".into(), Some("manual first".into())))
+    );
+
+    let renames_before_replacement = api.pane_renames.len();
+    api.agents[0].terminal_id = "replacement-terminal".into();
+    fs::write(first_path, "malformed").unwrap();
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(api.pane_renames.len(), renames_before_replacement);
+    assert_eq!(api.snapshot.panes[0].label.as_deref(), Some("manual first"));
 }
 
 #[test]
@@ -2040,7 +2444,11 @@ fn tab_name_listener_binary_preserves_manual_rename_before_rpc_ack() {
     fs::create_dir(&config).unwrap();
     fs::create_dir(&state).unwrap();
     fs::write(sessions.join("session.jsonl"), session_text("")).unwrap();
-    fs::write(config.join("config.toml"), "[tab_name]\nenabled = true\n").unwrap();
+    fs::write(
+        config.join("config.toml"),
+        "[tab_name]\nenabled = true\n[pane_name]\nenabled = true\n",
+    )
+    .unwrap();
     let listener = UnixListener::bind(&socket).unwrap();
     let (done_tx, done_rx) = mpsc::channel();
 
@@ -2074,6 +2482,7 @@ fn tab_name_listener_binary_preserves_manual_rename_before_rpc_ack() {
             "pane.process_info",
             "pane.report_metadata",
             "session.snapshot",
+            "pane.rename",
             "tab.rename",
             "agent.list",
             "pane.process_info",
@@ -2086,6 +2495,7 @@ fn tab_name_listener_binary_preserves_manual_rename_before_rpc_ack() {
             "session.snapshot",
         ];
         let mut current_label = "1".to_owned();
+        let mut current_pane_label = None::<String>;
         let mut rename_count = 0;
         for method in expected {
             let (rpc_stream, _) = listener.accept().unwrap();
@@ -2128,10 +2538,32 @@ fn tab_name_listener_binary_preserves_manual_rename_before_rpc_ack() {
                             }]
                         }],
                         "workspaces":[],
-                        "panes":[{"pane_id":"w1:p1","workspace_id":"w1","tab_id":"w1:t1"}],
+                        "panes":[{
+                            "pane_id":"w1:p1","workspace_id":"w1","tab_id":"w1:t1",
+                            "label":current_pane_label
+                        }],
                         "agents":[]
                     }
                 }),
+                "pane.rename" => {
+                    let label = request["params"]["label"].as_str().unwrap();
+                    assert_eq!(label, "Build context");
+                    current_pane_label = Some(label.to_owned());
+                    writeln!(
+                        event_writer,
+                        "{}",
+                        json!({
+                            "event":"pane_updated",
+                            "data":{"type":"pane_updated","pane":{"pane_id":"w1:p1"}}
+                        })
+                    )
+                    .unwrap();
+                    event_writer.flush().unwrap();
+                    json!({
+                        "type":"pane_info",
+                        "pane":{"pane_id":"w1:p1","label":label}
+                    })
+                }
                 "tab.rename" => {
                     rename_count += 1;
                     let label = request["params"]["label"].as_str().unwrap();
@@ -2213,13 +2645,17 @@ fn listener_binary_reconnects_full_syncs_and_rejects_duplicate_owner() {
     let socket = temp.path().join("herdr.sock");
     let sessions = temp.path().join("sessions");
     let config = temp.path().join("config");
+    let state = temp.path().join("state");
     fs::create_dir(&sessions).unwrap();
     fs::create_dir(&config).unwrap();
+    fs::create_dir(&state).unwrap();
     fs::write(sessions.join("session.jsonl"), session_text("")).unwrap();
+    fs::write(config.join("config.toml"), "[pane_name]\nenabled = true\n").unwrap();
     let listener = UnixListener::bind(&socket).unwrap();
     let (report_tx, report_rx) = mpsc::channel();
 
     let server = thread::spawn(move || {
+        let mut pane_label = None::<String>;
         for cycle in 0..2 {
             let (event_stream, _) = listener.accept().unwrap();
             let mut event_reader = BufReader::new(event_stream.try_clone().unwrap());
@@ -2245,7 +2681,24 @@ fn listener_binary_reconnects_full_syncs_and_rejects_duplicate_owner() {
             .unwrap();
             event_writer.flush().unwrap();
 
-            for method in ["agent.list", "pane.process_info", "pane.report_metadata"] {
+            let methods: &[&str] = if cycle == 0 {
+                &[
+                    "agent.list",
+                    "pane.process_info",
+                    "pane.report_metadata",
+                    "session.snapshot",
+                    "pane.rename",
+                ]
+            } else {
+                &[
+                    "agent.list",
+                    "pane.process_info",
+                    "pane.report_metadata",
+                    "session.snapshot",
+                ]
+            };
+            let mut reported_seq = None;
+            for &method in methods {
                 let (rpc_stream, _) = listener.accept().unwrap();
                 let mut reader = BufReader::new(rpc_stream.try_clone().unwrap());
                 let mut writer = rpc_stream;
@@ -2257,9 +2710,10 @@ fn listener_binary_reconnects_full_syncs_and_rejects_duplicate_owner() {
                     "agent.list" => json!({
                         "type": "agent_list",
                         "agents": [{
-                            "terminal_id": "term-1", "agent": "pi", "agent_status": "working",
-                            "cwd": "/work/project", "foreground_cwd": "/work/project",
-                            "pane_id": "w1:p1", "revision": cycle + 1
+                            "terminal_id": "term-1", "workspace_id":"w1", "tab_id":"w1:t1",
+                            "agent": "pi", "agent_status": "working", "cwd": "/work/project",
+                            "foreground_cwd": "/work/project", "pane_id": "w1:p1",
+                            "revision": cycle + 1
                         }]
                     }),
                     "pane.process_info" => json!({
@@ -2271,16 +2725,36 @@ fn listener_binary_reconnects_full_syncs_and_rejects_duplicate_owner() {
                     "pane.report_metadata" => {
                         assert!(request["params"]["tokens"][SESSION_NAME_TOKEN].is_string());
                         assert!(request["params"]["tokens"][LAST_MESSAGE_TOKEN].is_string());
-                        report_tx
-                            .send(request["params"]["seq"].as_u64().unwrap())
-                            .unwrap();
+                        reported_seq = request["params"]["seq"].as_u64();
                         json!({"type": "ok"})
+                    }
+                    "session.snapshot" => json!({
+                        "type":"session_snapshot",
+                        "snapshot":{
+                            "version":"0.8.0","protocol":19,
+                            "tabs":[{"tab_id":"w1:t1","workspace_id":"w1","number":1,"label":"1"}],
+                            "layouts":[{
+                                "workspace_id":"w1","tab_id":"w1:t1","focused_pane_id":"w1:p1",
+                                "panes":[{"pane_id":"w1:p1","rect":{"x":0,"y":0,"width":80,"height":24}}]
+                            }],
+                            "panes":[{
+                                "pane_id":"w1:p1","workspace_id":"w1","tab_id":"w1:t1",
+                                "label":pane_label
+                            }]
+                        }
+                    }),
+                    "pane.rename" => {
+                        let label = request["params"]["label"].as_str().unwrap();
+                        assert_eq!(label, "Build context");
+                        pane_label = Some(label.to_owned());
+                        json!({"type":"pane_info","pane":{"pane_id":"w1:p1","label":label}})
                     }
                     _ => unreachable!(),
                 };
                 writeln!(writer, "{}", json!({"id": request["id"], "result": result})).unwrap();
                 writer.flush().unwrap();
             }
+            report_tx.send(reported_seq.unwrap()).unwrap();
             drop(event_writer);
         }
     });
@@ -2291,6 +2765,7 @@ fn listener_binary_reconnects_full_syncs_and_rejects_duplicate_owner() {
             .env("HERDR_ENV", "1")
             .env("HERDR_SOCKET_PATH", &socket)
             .env("HERDR_PLUGIN_CONFIG_DIR", &config)
+            .env("HERDR_PLUGIN_STATE_DIR", &state)
             .env("PI_CODING_AGENT_SESSION_DIR", &sessions)
             .env("HOME", temp.path())
             .stdout(Stdio::null())
