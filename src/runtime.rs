@@ -288,17 +288,18 @@ impl Runtime {
             return Ok(self.disable_naming_for_topology(tab_snapshot_needed, pane_snapshot_needed));
         };
 
-        if self.config.tab_name.enabled || self.config.pane_name.enabled {
-            for pane in panes {
-                let (Some(workspace_id), Some(tab_id)) = (&pane.workspace_id, &pane.tab_id) else {
-                    return Ok(ReconcileStatus::default());
-                };
-                let Some(snapshot_pane) = validated.panes.get(pane.key.pane_id.as_str()) else {
-                    return Ok(ReconcileStatus::default());
-                };
-                if snapshot_pane.workspace_id != *workspace_id || snapshot_pane.tab_id != *tab_id {
-                    return Ok(ReconcileStatus::default());
-                }
+        for pane in panes {
+            let (Some(workspace_id), Some(tab_id)) = (&pane.workspace_id, &pane.tab_id) else {
+                return Ok(ReconcileStatus::default());
+            };
+            let Some(snapshot_pane) = validated.panes.get(pane.key.pane_id.as_str()) else {
+                return Ok(ReconcileStatus::default());
+            };
+            if snapshot_pane.workspace_id != *workspace_id
+                || snapshot_pane.tab_id != *tab_id
+                || snapshot_pane.terminal_id != pane.key.terminal_id
+            {
+                return Ok(ReconcileStatus::default());
             }
         }
 
@@ -310,18 +311,16 @@ impl Runtime {
             .panes
             .iter()
             .map(|snapshot_pane| {
-                let (terminal_id, binding_identity, context) =
-                    pane_inputs.get(snapshot_pane.pane_id.as_str()).map_or_else(
-                        || (String::new(), None, NamingContext::Unsupported),
-                        |pane| {
-                            let (context, binding_identity) =
-                                self.naming_context(pane, outcomes.get(&pane.key));
-                            (pane.key.terminal_id.clone(), binding_identity, context)
-                        },
-                    );
+                let (binding_identity, context) = pane_inputs
+                    .get(snapshot_pane.pane_id.as_str())
+                    .map_or((None, NamingContext::Unsupported), |pane| {
+                        let (context, binding_identity) =
+                            self.naming_context(pane, outcomes.get(&pane.key));
+                        (binding_identity, context)
+                    });
                 NamingPane {
                     pane_id: snapshot_pane.pane_id.clone(),
-                    terminal_id,
+                    terminal_id: snapshot_pane.terminal_id.clone(),
                     binding_identity,
                     tab_id: snapshot_pane.tab_id.clone(),
                     observed_label: snapshot_pane.label.clone(),
@@ -360,23 +359,21 @@ impl Runtime {
                 }
             };
             for effect in effects {
-                let completion = match api.rename_pane(effect.pane_id(), effect.label()) {
-                    Ok(pane)
-                        if pane.pane_id == effect.pane_id()
-                            && pane.label.as_deref() == effect.label() =>
-                    {
-                        PaneRenameCompletion::Applied
-                    }
-                    Ok(_) => {
-                        self.pane_names = None;
-                        status.pane_name_disabled = true;
-                        break;
-                    }
-                    Err(error) if A::is_missing_pane_error(&error) => {
-                        PaneRenameCompletion::MissingPane
-                    }
-                    Err(error) => return Err(error),
-                };
+                let completion =
+                    match api.rename_pane(effect.pane_id(), effect.terminal_id(), effect.label()) {
+                        Ok(pane)
+                            if pane.pane_id == effect.pane_id()
+                                && pane.terminal_id == effect.terminal_id()
+                                && pane.label.as_deref() == effect.label() =>
+                        {
+                            PaneRenameCompletion::Applied
+                        }
+                        Ok(_) => break,
+                        Err(error) if A::is_missing_pane_error(&error) => {
+                            PaneRenameCompletion::MissingPane
+                        }
+                        Err(error) => return Err(error),
+                    };
                 if self
                     .pane_names
                     .as_mut()
@@ -729,6 +726,7 @@ fn validate_naming_snapshot(snapshot: &SessionSnapshot) -> Option<ValidatedNamin
     let mut panes = HashMap::new();
     for pane in &snapshot.panes {
         if pane.pane_id.is_empty()
+            || pane.terminal_id.is_empty()
             || tab_workspaces.get(pane.tab_id.as_str()).copied() != Some(pane.workspace_id.as_str())
             || panes.insert(pane.pane_id.as_str(), pane).is_some()
         {
@@ -848,6 +846,7 @@ mod tests {
             }],
             panes: vec![SnapshotPane {
                 pane_id: "w1:p1".into(),
+                terminal_id: "terminal-w1:p1".into(),
                 workspace_id: "w1".into(),
                 tab_id: "w1:t1".into(),
                 label: None,

@@ -165,13 +165,7 @@ impl TabNameManager {
                     incomplete_evidence
                         .as_ref()
                         .and_then(|evidence| recover_incomplete_selection(tab_state, evidence))
-                        .or_else(|| {
-                            if incomplete_evidence.is_none() {
-                                composition.map(|value| value.selection.clone())
-                            } else {
-                                None
-                            }
-                        })
+                        .or_else(|| composition.map(|value| value.selection.clone()))
                 });
             let Some(tab_state) = self.document.tabs.get_mut(&observation.tab_id) else {
                 continue;
@@ -247,10 +241,10 @@ impl TabNameManager {
                     .as_ref()
                     .and_then(|evidence| recover_incomplete_selection(tab_state, evidence))
             });
-            let composition = if incomplete_evidence.is_none() {
-                generated_composition
-            } else {
+            let composition = if recovered_selection.is_some() {
                 None
+            } else {
+                generated_composition
             };
             let active_selection = recovered_selection
                 .clone()
@@ -1642,6 +1636,78 @@ mod tests {
 
         assert_eq!(effects.len(), 1);
         assert_eq!(effects[0].label(), "Alpha + Beta updated");
+    }
+
+    #[test]
+    fn newly_failed_pane_without_prior_component_is_omitted_from_partial_aggregate() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut manager =
+            TabNameManager::load(temp.path(), Path::new("/tmp/herdr-new-failed-partial.sock"))
+                .unwrap();
+        let panes = [
+            resolved("w1:p1", "w1:t1", "session-a", "Alpha"),
+            failed("w1:p2", "w1:t1", "session-b"),
+        ];
+
+        let effects = manager
+            .reconcile(
+                true,
+                &[tab("w1:t1", 1, "baseline", "w1:p1")],
+                &panes,
+                Instant::now(),
+            )
+            .unwrap();
+
+        assert_eq!(effects.len(), 1);
+        assert_eq!(effects[0].label(), "Alpha");
+    }
+
+    #[test]
+    fn failed_pane_that_was_previously_untitled_is_omitted_from_partial_aggregate() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut manager = TabNameManager::load(
+            temp.path(),
+            Path::new("/tmp/herdr-untitled-failed-partial.sock"),
+        )
+        .unwrap();
+        let now = Instant::now();
+        let initial_panes = [
+            resolved("w1:p1", "w1:t1", "session-a", "Alpha"),
+            unresolved("w1:p2", "w1:t1", "session-b"),
+        ];
+        let initial = manager
+            .reconcile(
+                true,
+                &[tab("w1:t1", 1, "baseline", "w1:p1")],
+                &initial_panes,
+                now,
+            )
+            .unwrap();
+        assert_eq!(initial[0].label(), "Alpha");
+        complete(&mut manager, &initial[0]);
+
+        let failed_panes = [
+            resolved("w1:p1", "w1:t1", "session-a", "Alpha"),
+            failed("w1:p2", "w1:t1", "session-b"),
+        ];
+        let effects = manager
+            .reconcile(
+                true,
+                &[tab("w1:t1", 1, "Alpha", "w1:p1")],
+                &failed_panes,
+                now,
+            )
+            .unwrap();
+
+        assert!(effects.is_empty());
+        assert_eq!(
+            manager.document.tabs["w1:t1"]
+                .selection
+                .as_ref()
+                .unwrap()
+                .identity_digest,
+            digest_identity("w1:t1", "pi", "session-a")
+        );
     }
 
     #[test]

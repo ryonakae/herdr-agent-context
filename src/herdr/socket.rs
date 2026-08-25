@@ -72,13 +72,17 @@ impl SocketTransport {
     pub fn rename_pane(
         &mut self,
         pane_id: &str,
+        terminal_id: &str,
         label: Option<&str>,
     ) -> Result<PaneLabelInfo, SocketError> {
         let result = self
             .rpc
             .call("pane.rename", protocol::pane_rename_params(pane_id, label))?;
         let pane = protocol::parse_pane_label_info(result).map_err(SocketError::Json)?;
-        if pane.pane_id != pane_id || pane.label.as_deref() != label {
+        if pane.pane_id != pane_id
+            || pane.terminal_id != terminal_id
+            || pane.label.as_deref() != label
+        {
             return Err(SocketError::Protocol);
         }
         Ok(pane)

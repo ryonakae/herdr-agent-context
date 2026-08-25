@@ -35,6 +35,7 @@ pub trait HerdrApi {
     fn rename_pane(
         &mut self,
         pane_id: &str,
+        terminal_id: &str,
         label: Option<&str>,
     ) -> Result<PaneLabelInfo, Self::Error>;
     fn report_metadata(&mut self, report: MetadataReport<'_>) -> Result<(), Self::Error>;
@@ -77,9 +78,10 @@ impl HerdrApi for socket::SocketTransport {
     fn rename_pane(
         &mut self,
         pane_id: &str,
+        terminal_id: &str,
         label: Option<&str>,
     ) -> Result<PaneLabelInfo, Self::Error> {
-        self.rename_pane(pane_id, label)
+        self.rename_pane(pane_id, terminal_id, label)
     }
 
     fn report_metadata(&mut self, report: MetadataReport<'_>) -> Result<(), Self::Error> {

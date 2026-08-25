@@ -101,7 +101,7 @@ Automatic pane labels are also disabled by default and configured independently:
 enabled = true
 ```
 
-Each supported pane uses its own Pi session name or verified Claude title, bounded to 20 terminal columns. A manual pane rename, including clearing the label, overrides only the current session in that pane. Another session may use its generated label; returning restores the manual override. The listener restores the original pane label when the session leaves or pane naming is disabled. Pane overrides do not change tab components.
+Each supported pane uses its own Pi session name or verified Claude title, bounded to 20 terminal columns. A manual pane rename, including clearing the label, overrides only the current session in that pane. Another session may use its generated label; returning restores the manual override. The listener restores the latest manual pane baseline when the session leaves or pane naming is disabled. Pane overrides do not change tab components.
 
 ## Configuration
 

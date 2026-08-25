@@ -1,6 +1,9 @@
 mod state;
 
-use std::{collections::BTreeMap, path::Path};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    path::Path,
+};
 
 use state::{
     Applied, AppliedSource, PaneState, PendingDisposition, PendingTransition, PersistedState,
@@ -39,6 +42,7 @@ pub enum DisplayState {
 
 pub struct RenameEffect {
     pane_id: String,
+    terminal_id: String,
     label: Option<String>,
     token: TransitionToken,
 }
@@ -46,6 +50,10 @@ pub struct RenameEffect {
 impl RenameEffect {
     pub fn pane_id(&self) -> &str {
         &self.pane_id
+    }
+
+    pub fn terminal_id(&self) -> &str {
+        &self.terminal_id
     }
 
     pub fn label(&self) -> Option<&str> {
@@ -60,6 +68,7 @@ impl RenameEffect {
 #[derive(Clone)]
 pub struct TransitionToken {
     pane_digest: String,
+    terminal_digest: String,
     target_digest: String,
 }
 
@@ -102,13 +111,10 @@ impl PaneNameManager {
         panes: &[PaneSnapshot],
     ) -> Result<Vec<RenameEffect>, PaneNameError> {
         let before = self.document.clone();
-        let live_panes: std::collections::HashSet<_> = panes
-            .iter()
-            .map(|pane| digest_pane_id(&pane.pane_id))
-            .collect();
-        self.document
-            .panes
-            .retain(|pane_digest, _| live_panes.contains(pane_digest));
+        if !self.rekey_panes_by_terminal(panes) {
+            self.document = before;
+            return Ok(Vec::new());
+        }
 
         if !enabled && !self.document.panes.is_empty() {
             self.document.cleanup_pending = true;
@@ -129,7 +135,7 @@ impl PaneNameManager {
                 self.document.panes.insert(
                     pane_digest.clone(),
                     PaneState {
-                        terminal_digest: digest_terminal(&pane.pane_id, &pane.terminal_id),
+                        terminal_digest: digest_terminal(&pane.terminal_id),
                         baseline: pane.observed_label.clone(),
                         selection: Some(selection),
                         overrides: BTreeMap::new(),
@@ -143,7 +149,7 @@ impl PaneNameManager {
             }
 
             let pane_state = self.document.panes.get_mut(&pane_digest).unwrap();
-            let current_terminal_digest = digest_terminal(&pane.pane_id, &pane.terminal_id);
+            let current_terminal_digest = digest_terminal(&pane.terminal_id);
             let terminal_replaced = pane_state.terminal_digest != current_terminal_digest;
             if terminal_replaced {
                 reset_for_terminal(pane_state, pane, current_terminal_digest);
@@ -170,8 +176,7 @@ impl PaneNameManager {
                 }
                 if plan_target(
                     &pane_digest,
-                    &pane.pane_id,
-                    pane.observed_label.as_deref(),
+                    pane,
                     pane_state.baseline.clone(),
                     PendingDisposition::Release,
                     pane_state,
@@ -192,8 +197,7 @@ impl PaneNameManager {
                     pane_state.selection = selection;
                     plan_target(
                         &pane_digest,
-                        &pane.pane_id,
-                        pane.observed_label.as_deref(),
+                        pane,
                         label,
                         PendingDisposition::Keep { source },
                         pane_state,
@@ -218,6 +222,54 @@ impl PaneNameManager {
         Ok(effects)
     }
 
+    fn rekey_panes_by_terminal(&mut self, panes: &[PaneSnapshot]) -> bool {
+        let mut live_by_terminal = HashMap::new();
+        let mut live_pane_digests = HashSet::new();
+        for pane in panes {
+            let pane_digest = digest_pane_id(&pane.pane_id);
+            if !live_pane_digests.insert(pane_digest.clone())
+                || live_by_terminal
+                    .insert(digest_terminal(&pane.terminal_id), pane_digest)
+                    .is_some()
+            {
+                return false;
+            }
+        }
+
+        let mut owned_terminals = HashSet::new();
+        if self
+            .document
+            .panes
+            .values()
+            .any(|pane| !owned_terminals.insert(pane.terminal_digest.clone()))
+        {
+            return false;
+        }
+
+        let mut rekeyed = BTreeMap::new();
+        let mut unmatched = Vec::new();
+        for (old_pane_digest, pane_state) in &self.document.panes {
+            if let Some(pane_digest) = live_by_terminal.get(&pane_state.terminal_digest) {
+                if rekeyed
+                    .insert(pane_digest.clone(), pane_state.clone())
+                    .is_some()
+                {
+                    return false;
+                }
+            } else {
+                unmatched.push((old_pane_digest, pane_state));
+            }
+        }
+        for (old_pane_digest, pane_state) in unmatched {
+            if live_pane_digests.contains(old_pane_digest) && !rekeyed.contains_key(old_pane_digest)
+            {
+                rekeyed.insert(old_pane_digest.clone(), pane_state.clone());
+            }
+        }
+        self.document.panes = rekeyed;
+        true
+    }
+
     pub fn complete_rename(
         &mut self,
         token: &TransitionToken,
@@ -234,7 +286,9 @@ impl PaneNameManager {
         let Some(pending) = pane_state.pending.clone() else {
             return Err(PaneNameError::StaleTransition);
         };
-        if pending.target_digest != token.target_digest {
+        if pane_state.terminal_digest != token.terminal_digest
+            || pending.target_digest != token.target_digest
+        {
             return Err(PaneNameError::StaleTransition);
         }
 
@@ -380,8 +434,7 @@ fn observation_selection(pane_state: &PaneState, pane: &PaneSnapshot) -> Option<
         return None;
     };
     let binding_identity = pane.binding_identity.as_deref()?;
-    let generation_digest =
-        digest_generation(&pane.pane_id, &pane.terminal_id, agent, binding_identity);
+    let generation_digest = digest_generation(&pane.terminal_id, agent, binding_identity);
     pane_state
         .selection
         .as_ref()
@@ -398,13 +451,8 @@ fn supported_selection(pane: &PaneSnapshot) -> Option<Selection> {
         return None;
     };
     Some(Selection {
-        generation_digest: digest_generation(
-            &pane.pane_id,
-            &pane.terminal_id,
-            agent,
-            binding_identity,
-        ),
-        identity_digest: digest_identity(&pane.pane_id, agent, identity),
+        generation_digest: digest_generation(&pane.terminal_id, agent, binding_identity),
+        identity_digest: digest_identity(&pane.terminal_id, agent, identity),
     })
 }
 
@@ -495,14 +543,13 @@ fn retryable_failure_target(pane_state: &PaneState, selection: Selection) -> Opt
 
 fn plan_target(
     pane_digest: &str,
-    pane_id: &str,
-    observed_label: Option<&str>,
+    pane: &PaneSnapshot,
     target: Option<String>,
     disposition: PendingDisposition,
     pane_state: &mut PaneState,
     effects: &mut Vec<RenameEffect>,
 ) -> bool {
-    let prior_digest = digest_label(observed_label);
+    let prior_digest = digest_label(pane.observed_label.as_deref());
     let target_digest = digest_label(target.as_deref());
     if prior_digest == target_digest {
         return match disposition {
@@ -523,10 +570,12 @@ fn plan_target(
         disposition,
     });
     effects.push(RenameEffect {
-        pane_id: pane_id.to_owned(),
+        pane_id: pane.pane_id.clone(),
+        terminal_id: pane.terminal_id.clone(),
         label: target,
         token: TransitionToken {
             pane_digest: pane_digest.to_owned(),
+            terminal_digest: pane_state.terminal_digest.clone(),
             target_digest,
         },
     });
@@ -535,7 +584,7 @@ fn plan_target(
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::{fs, path::Path};
 
     use super::*;
 
@@ -1447,6 +1496,545 @@ mod tests {
             .reconcile(true, &tab_snapshot, &tab_panes, Instant::now())
             .unwrap();
         assert_eq!(retried[0].label(), "Alpha");
+    }
+
+    #[test]
+    fn workspace_move_preserves_manual_rename_and_clear_for_the_same_terminal_session() {
+        for manual_label in [Some("manual A"), None] {
+            let temporary = tempfile::tempdir().unwrap();
+            let socket = Path::new("/tmp/herdr-pane-workspace-move-manual.sock");
+            let mut manager = PaneNameManager::load(temporary.path(), socket).unwrap();
+            let acquired = manager
+                .reconcile(
+                    true,
+                    &[resolved(
+                        "w1:p1",
+                        "terminal-stable",
+                        "session-a",
+                        "Alpha",
+                        Some("baseline"),
+                    )],
+                )
+                .unwrap();
+            manager
+                .complete_rename(acquired[0].token(), RenameCompletion::Applied)
+                .unwrap();
+
+            assert!(
+                manager
+                    .reconcile(
+                        true,
+                        &[resolved(
+                            "w1:p1",
+                            "terminal-stable",
+                            "session-a",
+                            "Alpha",
+                            manual_label,
+                        )],
+                    )
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(
+                manager
+                    .reconcile(
+                        true,
+                        &[resolved(
+                            "w2:p9",
+                            "terminal-stable",
+                            "session-a",
+                            "Alpha",
+                            manual_label,
+                        )],
+                    )
+                    .unwrap()
+                    .is_empty()
+            );
+
+            assert_eq!(manager.document.panes.len(), 1);
+            assert!(
+                manager
+                    .document
+                    .panes
+                    .contains_key(&digest_pane_id("w2:p9"))
+            );
+        }
+    }
+
+    #[test]
+    fn workspace_move_survives_restart_and_disable_restores_exact_nullable_baseline() {
+        for baseline in [Some("baseline"), None] {
+            let temporary = tempfile::tempdir().unwrap();
+            let socket = Path::new("/tmp/herdr-pane-workspace-move-restart.sock");
+            let mut manager = PaneNameManager::load(temporary.path(), socket).unwrap();
+            let acquired = manager
+                .reconcile(
+                    true,
+                    &[resolved(
+                        "w1:p1",
+                        "terminal-stable",
+                        "session-a",
+                        "Alpha",
+                        baseline,
+                    )],
+                )
+                .unwrap();
+            manager
+                .complete_rename(acquired[0].token(), RenameCompletion::Applied)
+                .unwrap();
+            assert!(
+                manager
+                    .reconcile(
+                        true,
+                        &[resolved(
+                            "w2:p9",
+                            "terminal-stable",
+                            "session-a",
+                            "Alpha",
+                            Some("Alpha"),
+                        )],
+                    )
+                    .unwrap()
+                    .is_empty()
+            );
+            drop(manager);
+
+            let mut restarted = PaneNameManager::load(temporary.path(), socket).unwrap();
+            let released = restarted
+                .reconcile(
+                    false,
+                    &[resolved(
+                        "w2:p9",
+                        "terminal-stable",
+                        "session-a",
+                        "Alpha",
+                        Some("Alpha"),
+                    )],
+                )
+                .unwrap();
+
+            assert_eq!(released.len(), 1);
+            assert_eq!(released[0].pane_id(), "w2:p9");
+            assert_eq!(released[0].label(), baseline);
+        }
+    }
+
+    #[test]
+    fn workspace_move_state_keeps_generated_and_identity_material_private() {
+        use std::fs;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let socket = Path::new("/tmp/private-herdr-pane-move.sock");
+        let mut manager = PaneNameManager::load(temporary.path(), socket).unwrap();
+        let acquired = manager
+            .reconcile(
+                true,
+                &[resolved(
+                    "private-old-pane",
+                    "private-terminal",
+                    "private-session",
+                    "Generated Secret",
+                    Some("manual baseline"),
+                )],
+            )
+            .unwrap();
+        manager
+            .complete_rename(acquired[0].token(), RenameCompletion::Applied)
+            .unwrap();
+        manager
+            .reconcile(
+                true,
+                &[resolved(
+                    "private-new-pane",
+                    "private-terminal",
+                    "private-session",
+                    "Generated Secret",
+                    Some("Generated Secret"),
+                )],
+            )
+            .unwrap();
+
+        let persisted = fs::read_to_string(manager.state_file.path()).unwrap();
+        assert!(persisted.contains("manual baseline"));
+        for private in [
+            "Generated Secret",
+            "private-session",
+            "/tmp/private-herdr-pane-move.sock",
+            "private-terminal",
+            "binding-private-session",
+        ] {
+            assert!(!persisted.contains(private), "persisted {private}");
+        }
+    }
+
+    #[test]
+    fn terminal_ownership_rekeys_atomically_when_old_ids_are_reused() {
+        let temporary = tempfile::tempdir().unwrap();
+        let socket = Path::new("/tmp/herdr-pane-id-reuse.sock");
+        let mut manager = PaneNameManager::load(temporary.path(), socket).unwrap();
+        let acquired = manager
+            .reconcile(
+                true,
+                &[
+                    resolved("pane-a", "terminal-a", "session-a", "Alpha", Some("base A")),
+                    resolved("pane-b", "terminal-b", "session-b", "Beta", Some("base B")),
+                ],
+            )
+            .unwrap();
+        assert_eq!(acquired.len(), 2);
+        for effect in &acquired {
+            manager
+                .complete_rename(effect.token(), RenameCompletion::Applied)
+                .unwrap();
+        }
+        assert!(
+            manager
+                .reconcile(
+                    true,
+                    &[
+                        resolved(
+                            "pane-a",
+                            "terminal-a",
+                            "session-a",
+                            "Alpha",
+                            Some("manual A")
+                        ),
+                        resolved("pane-b", "terminal-b", "session-b", "Beta", None),
+                    ],
+                )
+                .unwrap()
+                .is_empty()
+        );
+        drop(manager);
+
+        let mut restarted = PaneNameManager::load(temporary.path(), socket).unwrap();
+        assert!(
+            restarted
+                .reconcile(
+                    true,
+                    &[
+                        resolved("pane-a", "terminal-b", "session-b", "Beta", None),
+                        resolved(
+                            "pane-c",
+                            "terminal-a",
+                            "session-a",
+                            "Alpha",
+                            Some("manual A")
+                        ),
+                    ],
+                )
+                .unwrap()
+                .is_empty()
+        );
+        let released = restarted
+            .reconcile(
+                false,
+                &[
+                    resolved("pane-a", "terminal-b", "session-b", "Beta", None),
+                    resolved(
+                        "pane-c",
+                        "terminal-a",
+                        "session-a",
+                        "Alpha",
+                        Some("manual A"),
+                    ),
+                ],
+            )
+            .unwrap();
+        assert!(released.is_empty());
+        assert!(!restarted.needs_snapshot(false));
+    }
+
+    #[test]
+    fn two_terminal_pane_id_swap_preserves_nullable_manual_ownership() {
+        let temporary = tempfile::tempdir().unwrap();
+        let socket = Path::new("/tmp/private-herdr-pane-swap.sock");
+        let mut manager = PaneNameManager::load(temporary.path(), socket).unwrap();
+        let acquired = manager
+            .reconcile(
+                true,
+                &[
+                    resolved(
+                        "private-pane-a",
+                        "private-terminal-a",
+                        "private-session-a",
+                        "Alpha",
+                        Some("base A"),
+                    ),
+                    resolved(
+                        "private-pane-b",
+                        "private-terminal-b",
+                        "private-session-b",
+                        "Beta",
+                        Some("base B"),
+                    ),
+                ],
+            )
+            .unwrap();
+        for effect in &acquired {
+            manager
+                .complete_rename(effect.token(), RenameCompletion::Applied)
+                .unwrap();
+        }
+        assert!(
+            manager
+                .reconcile(
+                    true,
+                    &[
+                        resolved(
+                            "private-pane-a",
+                            "private-terminal-a",
+                            "private-session-a",
+                            "Alpha",
+                            Some("manual A")
+                        ),
+                        resolved(
+                            "private-pane-b",
+                            "private-terminal-b",
+                            "private-session-b",
+                            "Beta",
+                            None
+                        ),
+                    ],
+                )
+                .unwrap()
+                .is_empty()
+        );
+        drop(manager);
+
+        let mut restarted = PaneNameManager::load(temporary.path(), socket).unwrap();
+        assert!(
+            restarted
+                .reconcile(
+                    true,
+                    &[
+                        resolved(
+                            "private-pane-a",
+                            "private-terminal-b",
+                            "private-session-b",
+                            "Beta",
+                            None
+                        ),
+                        resolved(
+                            "private-pane-b",
+                            "private-terminal-a",
+                            "private-session-a",
+                            "Alpha",
+                            Some("manual A")
+                        ),
+                    ],
+                )
+                .unwrap()
+                .is_empty()
+        );
+        let released = restarted
+            .reconcile(
+                false,
+                &[
+                    resolved(
+                        "private-pane-a",
+                        "private-terminal-b",
+                        "private-session-b",
+                        "Beta",
+                        None,
+                    ),
+                    resolved(
+                        "private-pane-b",
+                        "private-terminal-a",
+                        "private-session-a",
+                        "Alpha",
+                        Some("manual A"),
+                    ),
+                ],
+            )
+            .unwrap();
+        assert!(released.is_empty());
+        assert!(!restarted.needs_snapshot(false));
+
+        let persisted = fs::read_to_string(restarted.state_file.path()).unwrap_or_default();
+        for private in [
+            "private-pane-a",
+            "private-pane-b",
+            "private-terminal-a",
+            "private-terminal-b",
+            "private-session-a",
+            "private-session-b",
+            "binding-private-session-a",
+            "binding-private-session-b",
+            "Alpha",
+            "Beta",
+        ] {
+            assert!(!persisted.contains(private), "persisted {private}");
+        }
+    }
+
+    #[test]
+    fn pending_transitions_rekey_on_swap_and_old_tokens_cannot_complete_wrong_terminal() {
+        let temporary = tempfile::tempdir().unwrap();
+        let socket = Path::new("/tmp/herdr-pane-pending-swap.sock");
+        let mut manager = PaneNameManager::load(temporary.path(), socket).unwrap();
+        let pending = manager
+            .reconcile(
+                true,
+                &[
+                    resolved("pane-a", "terminal-a", "session-a", "Alpha", Some("base A")),
+                    resolved("pane-b", "terminal-b", "session-b", "Beta", Some("base B")),
+                ],
+            )
+            .unwrap();
+        let stale_tokens: Vec<_> = pending
+            .iter()
+            .map(|effect| effect.token().clone())
+            .collect();
+        drop(manager);
+
+        let mut restarted = PaneNameManager::load(temporary.path(), socket).unwrap();
+        let retried = restarted
+            .reconcile(
+                true,
+                &[
+                    resolved("pane-a", "terminal-b", "session-b", "Beta", Some("base B")),
+                    resolved("pane-b", "terminal-a", "session-a", "Alpha", Some("base A")),
+                ],
+            )
+            .unwrap();
+        assert_eq!(retried.len(), 2);
+        assert_eq!(retried[0].pane_id(), "pane-a");
+        assert_eq!(retried[0].label(), Some("Beta"));
+        assert_eq!(retried[1].pane_id(), "pane-b");
+        assert_eq!(retried[1].label(), Some("Alpha"));
+        for token in &stale_tokens {
+            assert!(matches!(
+                restarted.complete_rename(token, RenameCompletion::Applied),
+                Err(PaneNameError::StaleTransition)
+            ));
+        }
+        for effect in &retried {
+            restarted
+                .complete_rename(effect.token(), RenameCompletion::Applied)
+                .unwrap();
+        }
+
+        let released = restarted
+            .reconcile(
+                false,
+                &[
+                    resolved("pane-a", "terminal-b", "session-b", "Beta", Some("Beta")),
+                    resolved("pane-b", "terminal-a", "session-a", "Alpha", Some("Alpha")),
+                ],
+            )
+            .unwrap();
+        assert_eq!(released.len(), 2);
+        assert_eq!(released[0].pane_id(), "pane-a");
+        assert_eq!(released[0].label(), Some("base B"));
+        assert_eq!(released[1].pane_id(), "pane-b");
+        assert_eq!(released[1].label(), Some("base A"));
+    }
+
+    #[test]
+    fn duplicate_live_terminal_identity_fails_safe_without_rewriting_or_renaming() {
+        let temporary = tempfile::tempdir().unwrap();
+        let socket = Path::new("/tmp/herdr-pane-duplicate-terminal.sock");
+        let mut manager = PaneNameManager::load(temporary.path(), socket).unwrap();
+        let acquired = manager
+            .reconcile(
+                true,
+                &[resolved(
+                    "pane-a",
+                    "terminal-a",
+                    "session-a",
+                    "Alpha",
+                    Some("baseline"),
+                )],
+            )
+            .unwrap();
+        manager
+            .complete_rename(acquired[0].token(), RenameCompletion::Applied)
+            .unwrap();
+        assert!(
+            manager
+                .reconcile(
+                    true,
+                    &[resolved(
+                        "pane-a",
+                        "terminal-a",
+                        "session-a",
+                        "Alpha",
+                        Some("manual A")
+                    )],
+                )
+                .unwrap()
+                .is_empty()
+        );
+        let persisted_before = fs::read(manager.state_file.path()).unwrap();
+
+        let effects = manager
+            .reconcile(
+                true,
+                &[
+                    resolved(
+                        "pane-a",
+                        "terminal-a",
+                        "session-a",
+                        "Alpha",
+                        Some("manual A"),
+                    ),
+                    resolved("pane-b", "terminal-a", "session-a", "Alpha", Some("other")),
+                ],
+            )
+            .unwrap();
+        assert!(effects.is_empty());
+        assert_eq!(
+            fs::read(manager.state_file.path()).unwrap(),
+            persisted_before
+        );
+        assert_eq!(manager.document.panes.len(), 1);
+    }
+
+    #[test]
+    fn duplicate_persisted_terminal_ownership_fails_safe_without_data_loss() {
+        let temporary = tempfile::tempdir().unwrap();
+        let socket = Path::new("/tmp/herdr-pane-duplicate-state-terminal.sock");
+        let mut manager = PaneNameManager::load(temporary.path(), socket).unwrap();
+        let acquired = manager
+            .reconcile(
+                true,
+                &[resolved(
+                    "pane-a",
+                    "terminal-a",
+                    "session-a",
+                    "Alpha",
+                    Some("baseline"),
+                )],
+            )
+            .unwrap();
+        manager
+            .complete_rename(acquired[0].token(), RenameCompletion::Applied)
+            .unwrap();
+        let duplicate = manager.document.panes.values().next().unwrap().clone();
+        manager
+            .document
+            .panes
+            .insert(digest_pane_id("pane-b"), duplicate);
+        manager.persist_document().unwrap();
+        let persisted_before = fs::read(manager.state_file.path()).unwrap();
+
+        let effects = manager
+            .reconcile(
+                true,
+                &[
+                    resolved("pane-a", "terminal-a", "session-a", "Alpha", Some("Alpha")),
+                    resolved("pane-b", "terminal-b", "session-b", "Beta", Some("other")),
+                ],
+            )
+            .unwrap();
+
+        assert!(effects.is_empty());
+        assert_eq!(
+            fs::read(manager.state_file.path()).unwrap(),
+            persisted_before
+        );
+        assert_eq!(manager.document.panes.len(), 2);
     }
 
     #[test]

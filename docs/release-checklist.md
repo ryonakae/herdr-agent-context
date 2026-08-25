@@ -117,7 +117,7 @@ herdr agent prompt context_claude "Reply with a short synthetic Claude status." 
 - [x] Current `customTitle` and legacy `title` records take precedence over the latest matching `ai-title`.
 - [x] Without a matching custom or AI title, the session-name token stays empty even when first-user text and cwd exist.
 - [x] A matching normalized terminal title is accepted; a missing or mismatched terminal title falls back to the verified JSONL title.
-- [x] Live: a newly started Claude session without a custom or AI title leaves the existing tab baseline unchanged.
+- [ ] Live (not run in this review): a newly started Claude session without a custom or AI title leaves the existing tab baseline unchanged.
 - [x] The latest top-level assistant text after the latest human entry appears without added surrounding quotes.
 - [x] Thinking, tool activity, tool results, sidechains, API errors, and abandoned branches never appear.
 - [x] A new human entry retains prior activity; switching to another session does not carry it across.
@@ -140,7 +140,9 @@ herdr agent prompt context_claude "Reply with a short synthetic Claude status." 
 
 ## Optional tab and pane label behavior
 
-Keep the default-off check separate from the opt-in checks. For the opt-in smoke, back up the plugin's `config.toml`, enable `[tab_name]` and `[pane_name]` independently and together, then restore the exact original file before cleanup. Use only the disposable named session and synthetic agents created above.
+Keep the default-off check separate from the opt-in checks. For the opt-in smoke, back up the plugin's `config.toml`, enable `[tab_name]` and `[pane_name]` independently and together, then restore the exact original file before cleanup. Use only the disposable named session and synthetic agents created above. If the live smoke is not applicable, leave its boxes unchecked and record the reason; automated coverage does not count as an executed live check.
+
+Current final-review status: live smoke is N/A because named sessions share the global Herdr plugin registry, and replacing it with the unreleased build would mutate the active user's plugin state.
 
 - [x] With both naming tables omitted, the listener sends no `session.snapshot`, `tab.rename`, or `pane.rename` request and naming-only events do not refresh metadata.
 - [x] Generated components use the Pi name or verified Claude title, preserve grapheme clusters, and occupy at most 20 terminal columns; the aggregate retains every component joined with ` + `.
@@ -152,10 +154,10 @@ Keep the default-off check separate from the opt-in checks. For the opt-in smoke
 - [x] Pane session and terminal replacement, move, close, listener restart, and `[pane_name] enabled = false` restore or recompute the exact owned label.
 - [x] Setting either naming feature to `false` restores its latest baseline. An inferred numeric tab baseline uses the current workspace-local position after reordering.
 - [x] Pane and tab state failures disable only their own synchronizer without blocking the other synchronizer or sidebar metadata. State files contain manual labels but no plaintext generated title, session identity, terminal/binding generation, or socket path.
-- [x] Live: Pi and Claude generated/custom labels, focus switching, shell retention, manual override, config disable, and listener restart match the rules above in an isolated disposable Herdr session.
-- [x] Live: after the selected Pi process exits, the tab restores the exact baseline captured before acquisition.
-- [x] Live: force-stopping the listener leaves the generated custom label; restarting and then setting `enabled = false` restores the saved numeric baseline.
-- [x] The listener, synthetic agents and transcripts, temporary pane, isolated server, state/config directories, and disposable session are removed after the smoke.
+- [ ] Live (not run in this review): Pi and Claude generated/custom labels, focus switching, shell retention, manual override, config disable, and listener restart match the rules above in an isolated disposable Herdr session.
+- [ ] Live (not run in this review): after the selected Pi process exits, the tab recomputes from any remaining resolved components; it restores the exact baseline only when no resolved component remains.
+- [ ] Live (not run in this review): force-stopping the listener leaves the generated custom label; restarting and then setting `enabled = false` restores the saved numeric baseline.
+- [ ] Live cleanup (not applicable because the smoke was not run): remove the listener, synthetic agents and transcripts, temporary pane, isolated server, state/config directories, and disposable session.
 
 ## Temporary official integrations
 

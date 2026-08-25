@@ -121,6 +121,7 @@ pub struct PaneRect {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 pub struct SnapshotPane {
     pub pane_id: String,
+    pub terminal_id: String,
     pub workspace_id: String,
     pub tab_id: String,
     #[serde(default)]
@@ -130,6 +131,7 @@ pub struct SnapshotPane {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 pub struct PaneLabelInfo {
     pub pane_id: String,
+    pub terminal_id: String,
     #[serde(default)]
     pub label: Option<String>,
 }
@@ -353,7 +355,7 @@ mod tests {
                     {"workspace_id":"w1","tab_id":"w1:t2","focused_pane_id":"w1:p3","panes":[]}
                 ],
                 "workspaces": [],
-                "panes": [{"pane_id":"w1:p2","workspace_id":"w1","tab_id":"w1:t1","label":null}],
+                "panes": [{"pane_id":"w1:p2","terminal_id":"term-2","workspace_id":"w1","tab_id":"w1:t1","label":null}],
                 "agents": [], "future": true
             }
         }))
@@ -365,6 +367,7 @@ mod tests {
         assert_eq!(snapshot.layouts[0].panes[1].pane_id, "w1:p1");
         assert_eq!(snapshot.layouts[1].tab_id, "w1:t2");
         assert_eq!(snapshot.panes[0].tab_id, "w1:t1");
+        assert_eq!(snapshot.panes[0].terminal_id, "term-2");
         assert_eq!(snapshot.panes[0].label, None);
 
         assert_eq!(
@@ -396,6 +399,7 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(pane.pane_id, "w1:p1");
+        assert_eq!(pane.terminal_id, "term-1");
         assert_eq!(pane.label.as_deref(), Some("pane title"));
         let cleared = parse_pane_label_info(json!({
             "type":"pane_info",

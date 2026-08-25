@@ -47,6 +47,7 @@ struct FakeApi {
     fail_next_clear: bool,
     fail_next_pane_rename: bool,
     miss_next_pane_rename: bool,
+    wrong_terminal_next_pane_rename: bool,
 }
 
 impl HerdrApi for FakeApi {
@@ -100,6 +101,7 @@ impl HerdrApi for FakeApi {
     fn rename_pane(
         &mut self,
         pane_id: &str,
+        _terminal_id: &str,
         label: Option<&str>,
     ) -> Result<PaneLabelInfo, Self::Error> {
         if self.fail_next_pane_rename {
@@ -112,16 +114,23 @@ impl HerdrApi for FakeApi {
         }
         let label = label.map(ToOwned::to_owned);
         self.pane_renames.push((pane_id.to_owned(), label.clone()));
-        if let Some(pane) = self
+        let wrong_terminal = std::mem::take(&mut self.wrong_terminal_next_pane_rename);
+        let pane = self
             .snapshot
             .panes
             .iter_mut()
             .find(|pane| pane.pane_id == pane_id)
-        {
+            .unwrap();
+        if !wrong_terminal {
             pane.label = label.clone();
         }
         Ok(PaneLabelInfo {
             pane_id: pane_id.to_owned(),
+            terminal_id: if wrong_terminal {
+                "wrong-terminal".into()
+            } else {
+                pane.terminal_id.clone()
+            },
             label,
         })
     }
@@ -146,7 +155,7 @@ impl HerdrApi for FakeApi {
 
 fn agent() -> AgentInfo {
     AgentInfo {
-        terminal_id: "term-1".into(),
+        terminal_id: "term-w1:p1".into(),
         workspace_id: Some("w1".into()),
         tab_id: Some("w1:t1".into()),
         agent: Some("pi".into()),
@@ -193,6 +202,7 @@ fn layout_pane(pane_id: &str, x: u16, y: u16) -> LayoutPane {
 fn snapshot_pane(pane_id: &str, workspace_id: &str, tab_id: &str) -> SnapshotPane {
     SnapshotPane {
         pane_id: pane_id.into(),
+        terminal_id: format!("term-{pane_id}"),
         workspace_id: workspace_id.into(),
         tab_id: tab_id.into(),
         label: None,
@@ -216,6 +226,7 @@ fn fake_api() -> FakeApi {
         fail_next_clear: false,
         fail_next_pane_rename: false,
         miss_next_pane_rename: false,
+        wrong_terminal_next_pane_rename: false,
     }
 }
 
@@ -921,6 +932,176 @@ fn pane_runtime_adopts_manual_rename_and_clear_on_periodic_snapshots() {
 }
 
 #[test]
+fn pane_runtime_preserves_manual_rename_and_clear_through_same_terminal_shell_round_trip() {
+    for manual_label in [Some("manual pane"), None] {
+        let temp = tempfile::tempdir().unwrap();
+        let sessions = temp.path().join("sessions");
+        let state = temp.path().join("state");
+        fs::create_dir(&sessions).unwrap();
+        fs::create_dir(&state).unwrap();
+        fs::write(sessions.join("session.jsonl"), session_text("")).unwrap();
+        let mut runtime = Runtime::new(
+            pi_naming_config(sessions, false, true),
+            PathBuf::from("/no-home"),
+            HashMap::new(),
+        );
+        runtime
+            .initialize_pane_names(&state, Path::new("/tmp/herdr-pane-shell-round-trip.sock"))
+            .unwrap();
+        let mut api = single_pi_tab_api("baseline");
+        api.snapshot.panes[0].label = Some("pane baseline".into());
+
+        runtime.reconcile(&mut api).unwrap();
+        assert_eq!(api.pane_renames.len(), 1);
+        api.snapshot.panes[0].label = manual_label.map(str::to_owned);
+        runtime.reconcile(&mut api).unwrap();
+        assert_eq!(api.pane_renames.len(), 1);
+
+        api.agents.clear();
+        runtime.reconcile(&mut api).unwrap();
+        assert_eq!(api.pane_renames.len(), 1);
+
+        api.agents.push(agent());
+        runtime.reconcile(&mut api).unwrap();
+        assert_eq!(api.pane_renames.len(), 1);
+        assert_eq!(api.snapshot.panes[0].label.as_deref(), manual_label);
+    }
+}
+
+#[test]
+fn naming_defers_when_agent_list_terminal_disagrees_with_snapshot() {
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let state = temp.path().join("state");
+    fs::create_dir(&sessions).unwrap();
+    fs::create_dir(&state).unwrap();
+    fs::write(sessions.join("session.jsonl"), session_text("")).unwrap();
+    let socket = Path::new("/tmp/herdr-terminal-race.sock");
+    let mut runtime = Runtime::new(
+        pi_naming_config(sessions, true, true),
+        PathBuf::from("/no-home"),
+        HashMap::new(),
+    );
+    runtime.initialize_tab_names(&state, socket).unwrap();
+    runtime.initialize_pane_names(&state, socket).unwrap();
+    let mut api = single_pi_tab_api("baseline");
+    api.snapshot.panes[0].terminal_id = "stale-snapshot-terminal".into();
+
+    let status = runtime.reconcile(&mut api).unwrap();
+
+    assert_eq!(status, Default::default());
+    assert!(runtime.tab_names_available());
+    assert!(runtime.pane_names_available());
+    assert!(api.renames.is_empty());
+    assert!(api.pane_renames.is_empty());
+    assert_eq!(api.reports.len(), 1);
+}
+
+#[test]
+fn config_disable_defers_owned_cleanup_until_topology_matches() {
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let state = temp.path().join("state");
+    fs::create_dir(&sessions).unwrap();
+    fs::create_dir(&state).unwrap();
+    fs::write(sessions.join("session.jsonl"), session_text("")).unwrap();
+    let socket = Path::new("/tmp/herdr-config-disable-topology-race.sock");
+    let mut runtime = Runtime::new(
+        pi_naming_config(sessions.clone(), true, true),
+        PathBuf::from("/no-home"),
+        HashMap::new(),
+    );
+    runtime.initialize_tab_names(&state, socket).unwrap();
+    runtime.initialize_pane_names(&state, socket).unwrap();
+    let mut api = single_pi_tab_api("tab baseline");
+    api.snapshot.panes[0].label = Some("pane baseline".into());
+    runtime.reconcile(&mut api).unwrap();
+    let tab_renames = api.renames.len();
+    let pane_renames = api.pane_renames.len();
+
+    runtime.set_config(pi_naming_config(sessions, false, false));
+    api.snapshot.panes[0].terminal_id = "stale-snapshot-terminal".into();
+    let status = runtime.reconcile(&mut api).unwrap();
+
+    assert_eq!(status, Default::default());
+    assert!(runtime.tab_names_available());
+    assert!(runtime.pane_names_available());
+    assert_eq!(api.renames.len(), tab_renames);
+    assert_eq!(api.pane_renames.len(), pane_renames);
+
+    api.snapshot.panes[0].terminal_id = api.agents[0].terminal_id.clone();
+    runtime.reconcile(&mut api).unwrap();
+
+    assert_eq!(
+        api.renames.last(),
+        Some(&("w1:t1".into(), "tab baseline".into()))
+    );
+    assert_eq!(
+        api.pane_renames.last(),
+        Some(&("w1:p1".into(), Some("pane baseline".into())))
+    );
+}
+
+#[test]
+fn pane_runtime_migrates_workspace_move_then_restart_disable_restores_baseline() {
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let state = temp.path().join("state");
+    fs::create_dir(&sessions).unwrap();
+    fs::create_dir(&state).unwrap();
+    fs::write(sessions.join("session.jsonl"), session_text("")).unwrap();
+    let socket = Path::new("/tmp/herdr-pane-workspace-move-runtime.sock");
+    let config = || pi_naming_config(sessions.clone(), false, true);
+    let mut runtime = Runtime::new(config(), PathBuf::from("/no-home"), HashMap::new());
+    runtime.initialize_pane_names(&state, socket).unwrap();
+    let mut api = single_pi_tab_api("baseline");
+    api.snapshot.panes[0].label = Some("pane baseline".into());
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(api.pane_renames.len(), 1);
+
+    api.agents[0].pane_id = "w2:p9".into();
+    api.agents[0].workspace_id = Some("w2".into());
+    api.agents[0].tab_id = Some("w2:t1".into());
+    api.process_args.insert("w2:p9".into(), vec!["pi".into()]);
+    api.snapshot = SessionSnapshot {
+        tabs: vec![TabInfo {
+            tab_id: "w2:t1".into(),
+            workspace_id: "w2".into(),
+            number: 1,
+            label: "baseline".into(),
+        }],
+        layouts: vec![TabLayout {
+            workspace_id: "w2".into(),
+            tab_id: "w2:t1".into(),
+            focused_pane_id: "w2:p9".into(),
+            panes: vec![layout_pane("w2:p9", 0, 0)],
+        }],
+        panes: vec![SnapshotPane {
+            pane_id: "w2:p9".into(),
+            terminal_id: "term-w1:p1".into(),
+            workspace_id: "w2".into(),
+            tab_id: "w2:t1".into(),
+            label: Some("Build context".into()),
+        }],
+    };
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(api.pane_renames.len(), 1);
+    drop(runtime);
+
+    let mut restarted = Runtime::new(config(), PathBuf::from("/no-home"), HashMap::new());
+    restarted.initialize_pane_names(&state, socket).unwrap();
+    restarted.reconcile(&mut api).unwrap();
+    assert_eq!(api.pane_renames.len(), 1);
+    restarted.set_config(pi_naming_config(sessions, false, false));
+    restarted.reconcile(&mut api).unwrap();
+
+    assert_eq!(
+        api.pane_renames.last(),
+        Some(&("w2:p9".into(), Some("pane baseline".into())))
+    );
+}
+
+#[test]
 fn pane_runtime_propagates_transient_rename_failures_and_retries() {
     let temp = tempfile::tempdir().unwrap();
     let sessions = temp.path().join("sessions");
@@ -947,6 +1128,46 @@ fn pane_runtime_propagates_transient_rename_failures_and_retries() {
         api.pane_renames,
         vec![("w1:p1".into(), Some("Build context".into()))]
     );
+}
+
+#[test]
+fn pane_runtime_retries_wrong_terminal_rename_response_and_then_finalizes() {
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let state = temp.path().join("state");
+    fs::create_dir(&sessions).unwrap();
+    fs::create_dir(&state).unwrap();
+    fs::write(sessions.join("session.jsonl"), session_text("")).unwrap();
+    let mut runtime = Runtime::new(
+        pi_naming_config(sessions, false, true),
+        PathBuf::from("/no-home"),
+        HashMap::new(),
+    );
+    runtime
+        .initialize_pane_names(&state, Path::new("/tmp/herdr-pane-wrong-terminal.sock"))
+        .unwrap();
+    let mut api = single_pi_tab_api("baseline");
+    api.snapshot.panes[0].label = Some("pane baseline".into());
+    api.wrong_terminal_next_pane_rename = true;
+
+    runtime.reconcile(&mut api).unwrap();
+    assert!(runtime.pane_names_available());
+    assert_eq!(api.pane_renames.len(), 1);
+    assert_eq!(
+        api.snapshot.panes[0].label.as_deref(),
+        Some("pane baseline")
+    );
+
+    runtime.reconcile(&mut api).unwrap();
+    assert!(runtime.pane_names_available());
+    assert_eq!(api.pane_renames.len(), 2);
+    assert_eq!(
+        api.snapshot.panes[0].label.as_deref(),
+        Some("Build context")
+    );
+
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(api.pane_renames.len(), 2);
 }
 
 #[test]
@@ -1207,10 +1428,22 @@ fn pane_runtime_scopes_manual_override_to_session_and_releases_replaced_terminal
 
     let renames_before_replacement = api.pane_renames.len();
     api.agents[0].terminal_id = "replacement-terminal".into();
-    fs::write(first_path, "malformed").unwrap();
+    api.snapshot.panes[0].terminal_id = "replacement-terminal".into();
+    fs::write(&first_path, "malformed").unwrap();
     runtime.reconcile(&mut api).unwrap();
     assert_eq!(api.pane_renames.len(), renames_before_replacement);
     assert_eq!(api.snapshot.panes[0].label.as_deref(), Some("manual first"));
+
+    fs::write(
+        first_path,
+        claude_session_text(first_id, "/work/claude", "First", "Answer"),
+    )
+    .unwrap();
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(
+        api.pane_renames.last(),
+        Some(&("w1:p1".into(), Some("First".into())))
+    );
 }
 
 #[test]
@@ -1420,6 +1653,7 @@ fn tab_name_terminal_replacement_does_not_retain_failed_identity_component() {
     assert_eq!(api.renames.last().unwrap().1, "First");
 
     api.agents[0].terminal_id = "replacement-terminal".into();
+    api.snapshot.panes[0].terminal_id = "replacement-terminal".into();
     fs::write(&session, "malformed\n").unwrap();
     runtime.reconcile(&mut api).unwrap();
 
@@ -1567,6 +1801,7 @@ fn tab_name_restart_releases_pi_local_fallback_after_terminal_replacement() {
     drop(runtime);
 
     api.agents[0].terminal_id = "replacement-terminal".into();
+    api.snapshot.panes[0].terminal_id = "replacement-terminal".into();
     fs::write(&session, format!("{valid}malformed\n")).unwrap();
     let mut restarted = Runtime::new(
         pi_tab_name_config(sessions),
@@ -2539,7 +2774,7 @@ fn tab_name_listener_binary_preserves_manual_rename_before_rpc_ack() {
                         }],
                         "workspaces":[],
                         "panes":[{
-                            "pane_id":"w1:p1","workspace_id":"w1","tab_id":"w1:t1",
+                            "pane_id":"w1:p1","terminal_id":"term-1","workspace_id":"w1","tab_id":"w1:t1",
                             "label":current_pane_label
                         }],
                         "agents":[]
@@ -2561,7 +2796,7 @@ fn tab_name_listener_binary_preserves_manual_rename_before_rpc_ack() {
                     event_writer.flush().unwrap();
                     json!({
                         "type":"pane_info",
-                        "pane":{"pane_id":"w1:p1","label":label}
+                        "pane":{"pane_id":"w1:p1","terminal_id":"term-1","label":label}
                     })
                 }
                 "tab.rename" => {
@@ -2738,7 +2973,7 @@ fn listener_binary_reconnects_full_syncs_and_rejects_duplicate_owner() {
                                 "panes":[{"pane_id":"w1:p1","rect":{"x":0,"y":0,"width":80,"height":24}}]
                             }],
                             "panes":[{
-                                "pane_id":"w1:p1","workspace_id":"w1","tab_id":"w1:t1",
+                                "pane_id":"w1:p1","terminal_id":"term-1","workspace_id":"w1","tab_id":"w1:t1",
                                 "label":pane_label
                             }]
                         }
@@ -2747,7 +2982,7 @@ fn listener_binary_reconnects_full_syncs_and_rejects_duplicate_owner() {
                         let label = request["params"]["label"].as_str().unwrap();
                         assert_eq!(label, "Build context");
                         pane_label = Some(label.to_owned());
-                        json!({"type":"pane_info","pane":{"pane_id":"w1:p1","label":label}})
+                        json!({"type":"pane_info","pane":{"pane_id":"w1:p1","terminal_id":"term-1","label":label}})
                     }
                     _ => unreachable!(),
                 };
@@ -2841,7 +3076,7 @@ fn socket_transport_subscribes_first_buffers_events_and_uses_exact_metadata_cont
         event_writer.flush().unwrap();
 
         let mut pane_rename_count = 0;
-        for _ in 0..9 {
+        for _ in 0..10 {
             let (rpc_stream, _) = listener.accept().unwrap();
             let mut rpc_reader = BufReader::new(rpc_stream.try_clone().unwrap());
             let mut rpc_writer = rpc_stream;
@@ -2872,7 +3107,7 @@ fn socket_transport_subscribes_first_buffers_events_and_uses_exact_metadata_cont
                         "tabs":[{"tab_id":"w1:t1","workspace_id":"w1","number":1,"label":"1","focused":true,"pane_count":1,"agent_status":"working"}],
                         "layouts":[{"workspace_id":"w1","tab_id":"w1:t1","focused_pane_id":"w1:p1"}],
                         "workspaces":[],
-                        "panes":[{"pane_id":"w1:p1","workspace_id":"w1","tab_id":"w1:t1"}],
+                        "panes":[{"pane_id":"w1:p1","terminal_id":"term-1","workspace_id":"w1","tab_id":"w1:t1"}],
                         "agents":[]
                     }
                 }),
@@ -2882,16 +3117,21 @@ fn socket_transport_subscribes_first_buffers_events_and_uses_exact_metadata_cont
                 }),
                 "pane.rename" => {
                     pane_rename_count += 1;
-                    let pane_id = if pane_rename_count == 3 {
+                    let pane_id = if pane_rename_count == 4 {
                         "w1:p-other"
                     } else {
                         "w1:p1"
                     };
+                    let terminal_id = if pane_rename_count == 3 {
+                        "term-other"
+                    } else {
+                        "term-1"
+                    };
                     let mut pane = json!({
-                        "pane_id":pane_id,"terminal_id":"term-1","workspace_id":"w1",
+                        "pane_id":pane_id,"terminal_id":terminal_id,"workspace_id":"w1",
                         "tab_id":"w1:t1","focused":true,"agent_status":"working","revision":3
                     });
-                    if pane_rename_count == 4 {
+                    if pane_rename_count == 5 {
                         pane["label"] = json!("wrong label");
                     } else if let Some(label) = request["params"].get("label") {
                         pane["label"] = label.clone();
@@ -2940,19 +3180,29 @@ fn socket_transport_subscribes_first_buffers_events_and_uses_exact_metadata_cont
     );
     assert_eq!(
         transport
-            .rename_pane("w1:p1", Some("pane context"))
+            .rename_pane("w1:p1", "term-1", Some("pane context"))
             .unwrap()
             .label
             .as_deref(),
         Some("pane context")
     );
-    assert_eq!(transport.rename_pane("w1:p1", None).unwrap().label, None);
+    assert_eq!(
+        transport
+            .rename_pane("w1:p1", "term-1", None)
+            .unwrap()
+            .label,
+        None
+    );
     assert!(matches!(
-        transport.rename_pane("w1:p1", Some("pane context")),
+        transport.rename_pane("w1:p1", "term-1", Some("pane context")),
         Err(SocketError::Protocol)
     ));
     assert!(matches!(
-        transport.rename_pane("w1:p1", Some("pane context")),
+        transport.rename_pane("w1:p1", "term-1", Some("pane context")),
+        Err(SocketError::Protocol)
+    ));
+    assert!(matches!(
+        transport.rename_pane("w1:p1", "term-1", Some("pane context")),
         Err(SocketError::Protocol)
     ));
     transport
@@ -2987,7 +3237,7 @@ fn socket_transport_subscribes_first_buffers_events_and_uses_exact_metadata_cont
         .iter()
         .filter(|request| request["method"] == "pane.rename")
         .collect();
-    assert_eq!(pane_renames.len(), 4);
+    assert_eq!(pane_renames.len(), 5);
     assert_eq!(
         pane_renames[0]["params"],
         json!({"pane_id":"w1:p1","label":"pane context"})

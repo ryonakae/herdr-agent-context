@@ -376,8 +376,10 @@ Implementers must update this list only after each task's validation succeeds. R
 
 - Changed `src/runtime.rs`, `src/main.rs`, `tests/listener.rs`, `README.md`, `docs/release-checklist.md`, and `herdr-plugin.toml`.
 - Red evidence: new pane-only, combined-manager, and manual-pane integration tests failed to compile because `Runtime::initialize_pane_names` and pane reconciliation were absent.
-- Green evidence: 47 listener tests, 2 shared-topology tests, 18 pane manager tests, 32 tab manager tests, 6 binary tests, formatting, clippy with warnings denied, and whitespace checks passed. Independent review found no blocking/high issue.
+- Green evidence after final-review fixes: 52 listener tests, 2 shared-topology tests, 26 pane manager tests, 34 tab manager tests, 6 binary tests, formatting, clippy with warnings denied, and whitespace checks passed.
 - Both managers now consume one validated snapshot, keep independent state-disable status, and preserve `pane_updated`/focus no-loop behavior. Missing resources complete cleanup; transient RPC errors remain retryable.
+- Final review exposed lifecycle gaps not covered by the original Task 4 tests. Follow-up Red cases covered workspace moves that change or swap pane IDs, same-terminal shell round trips, agent/snapshot terminal races, wrong-terminal rename responses, config-disable cleanup races, partially failed aggregates, and duplicate state map keys. Ownership now rekeys atomically by unique terminal digest, rename completion verifies terminal identity, partial aggregates omit only unavailable components, and ambiguous topology fails without rewriting state.
+- Pane state uses one strict final schema v1 with pane-ID-independent private digests. Compatibility with intermediate commits was intentionally omitted because no release, tag, or package exposed the new pane state format. Independent broad and focused re-reviews found no remaining blocking/high issue.
 
 **Validation:**
 
@@ -423,13 +425,13 @@ Implementers must update this list only after each task's validation succeeds. R
 
 - Public docs and manifest match tested behavior.
 - All automated validation passes.
-- The isolated manual smoke passes and cleans up its listener, transcripts, panes, server, state, and config directories.
-- The plan moves to `docs/plans/archived/` only after every Final Validation item succeeds.
+- The isolated manual smoke passes and cleans up its resources when the plugin registry can be safely isolated; otherwise the reason and equivalent socket coverage are recorded as N/A.
+- The plan moves to `docs/plans/archived/` only after every applicable Final Validation item succeeds.
 
 **Implementation record (2026-08-25):**
 
 - Updated `README.md`, `docs/release-checklist.md`, and `herdr-plugin.toml` in the Task 4 commit so the user contract shipped atomically with runtime activation.
-- Green evidence: all 148 library tests, 6 binary tests, 47 listener/socket integration tests, formatting, clippy with warnings denied, release build, installer tests, release asset tests, actionlint, shellcheck, and whitespace checks passed.
+- Final Green evidence: all 159 library tests, 6 binary tests, 52 listener/socket integration tests, formatting, clippy with warnings denied, release build, installer tests, release asset tests, actionlint, shellcheck, and whitespace checks passed.
 - Live plugin smoke is N/A in this run: Herdr's installed/linked plugin registry is global across named sessions, so replacing it with an unreleased build would mutate the active user's plugin state. The temporary Unix socket listener tests cover the exact rename payloads, subscription order, reconnects, manual overrides, lifecycle, cleanup, and no-loop behavior without touching the active session.
 
 **Validation:**
@@ -469,10 +471,10 @@ Implementers must update this list only after each task's validation succeeds. R
 ## Final Validation
 
 - [x] `cargo test text::tests --locked` — 80-scalar sidebar behavior and 20-column grapheme-safe label behavior pass independently.
-- [x] `cargo test tab_name::tests --locked` — 32 aggregate ordering, composition override, lifecycle, and recovery tests pass with no focus dependency.
-- [x] `cargo test pane_name::tests --locked` — 18 nullable baseline, manual override, cleanup, and recovery tests pass.
-- [x] `cargo test --test listener --locked` — 47 runtime and Unix socket tests pass without focus or metadata loops.
-- [x] `cargo test --all-targets --locked` — 148 library, 6 binary, and 47 listener tests pass.
+- [x] `cargo test tab_name::tests --locked` — 34 aggregate ordering, partial failure, composition override, lifecycle, and recovery tests pass with no focus dependency.
+- [x] `cargo test pane_name::tests --locked` — 26 nullable baseline, manual override, atomic move/swap, cleanup, and recovery tests pass.
+- [x] `cargo test --test listener --locked` — 52 runtime and Unix socket tests pass without focus, metadata loops, or wrong-terminal completion.
+- [x] `cargo test --all-targets --locked` — 159 library, 6 binary, and 52 listener tests pass.
 - [x] `cargo fmt --check` — no formatting differences.
 - [x] `cargo clippy --all-targets -- -D warnings` — no warnings.
 - [x] `cargo build --release --locked` — the release binary builds.
@@ -481,7 +483,7 @@ Implementers must update this list only after each task's validation succeeds. R
 - [x] `actionlint .github/workflows/*.yml` — workflow files pass validation.
 - [x] `shellcheck scripts/*.sh tests/*.sh` — shell scripts pass linting.
 - [x] `git diff --check` — no whitespace errors.
-- [x] Live isolated Herdr plugin smoke — N/A because named sessions share the global plugin registry; exact behavior is covered by 47 temporary Unix socket integration tests without mutating the active user's plugin state.
+- [x] Live isolated Herdr plugin smoke — N/A because named sessions share the global plugin registry; exact behavior is covered by 52 temporary Unix socket integration tests without mutating the active user's plugin state.
 - [x] Requirement Coverage has no missing requirement or decision.
 - [x] The plan and actual changed files agree; implementation differences are recorded in Tasks 1–5.
 - [ ] After every item above succeeds, move this file without renaming it to `docs/plans/archived/2026-08-25-pane-and-aggregate-tab-labels.md`.

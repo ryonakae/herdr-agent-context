@@ -1,7 +1,9 @@
 use std::{
     collections::BTreeMap,
+    fmt,
     fs::{self, File, OpenOptions},
     io::Write,
+    marker::PhantomData,
     os::fd::{AsRawFd, FromRawFd},
     os::unix::{
         ffi::OsStrExt,
@@ -14,7 +16,10 @@ use std::{
 #[cfg(test)]
 use std::cell::Cell;
 
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize, Deserializer, Serialize,
+    de::{self, MapAccess, Visitor},
+};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -31,7 +36,42 @@ pub(crate) struct PersistedState {
     pub(crate) schema_version: u32,
     pub(crate) socket_digest: String,
     pub(crate) cleanup_pending: bool,
+    #[serde(deserialize_with = "deserialize_unique_map")]
     pub(crate) panes: BTreeMap<String, PaneState>,
+}
+
+fn deserialize_unique_map<'de, D, V>(deserializer: D) -> Result<BTreeMap<String, V>, D::Error>
+where
+    D: Deserializer<'de>,
+    V: Deserialize<'de>,
+{
+    struct UniqueMapVisitor<V>(PhantomData<V>);
+
+    impl<'de, V> Visitor<'de> for UniqueMapVisitor<V>
+    where
+        V: Deserialize<'de>,
+    {
+        type Value = BTreeMap<String, V>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a map with unique keys")
+        }
+
+        fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+        where
+            A: MapAccess<'de>,
+        {
+            let mut values = BTreeMap::new();
+            while let Some((key, value)) = map.next_entry()? {
+                if values.insert(key, value).is_some() {
+                    return Err(de::Error::custom("duplicate map key"));
+                }
+            }
+            Ok(values)
+        }
+    }
+
+    deserializer.deserialize_map(UniqueMapVisitor(PhantomData))
 }
 
 impl PersistedState {
@@ -51,6 +91,7 @@ pub(crate) struct PaneState {
     pub(crate) terminal_digest: String,
     pub(crate) baseline: Option<String>,
     pub(crate) selection: Option<Selection>,
+    #[serde(deserialize_with = "deserialize_unique_map")]
     pub(crate) overrides: BTreeMap<String, Option<String>>,
     pub(crate) applied: Applied,
     pub(crate) pending: Option<PendingTransition>,
@@ -355,34 +396,28 @@ pub(crate) fn digest_label(value: Option<&str>) -> String {
     }
 }
 
-pub(crate) fn digest_identity(pane_id: &str, agent: &str, identity: &str) -> String {
+pub(crate) fn digest_identity(terminal_id: &str, agent: &str, identity: &str) -> String {
     digest_parts(
         b"herdr-agent-context/pane-name/identity/v1",
-        &[pane_id.as_bytes(), agent.as_bytes(), identity.as_bytes()],
-    )
-}
-
-pub(crate) fn digest_terminal(pane_id: &str, terminal_id: &str) -> String {
-    digest_parts(
-        b"herdr-agent-context/pane-name/terminal/v1",
-        &[pane_id.as_bytes(), terminal_id.as_bytes()],
-    )
-}
-
-pub(crate) fn digest_generation(
-    pane_id: &str,
-    terminal_id: &str,
-    agent: &str,
-    binding_identity: &[u8],
-) -> String {
-    digest_parts(
-        b"herdr-agent-context/pane-name/generation/v1",
         &[
-            pane_id.as_bytes(),
             terminal_id.as_bytes(),
             agent.as_bytes(),
-            binding_identity,
+            identity.as_bytes(),
         ],
+    )
+}
+
+pub(crate) fn digest_terminal(terminal_id: &str) -> String {
+    digest_parts(
+        b"herdr-agent-context/pane-name/terminal/v1",
+        &[terminal_id.as_bytes()],
+    )
+}
+
+pub(crate) fn digest_generation(terminal_id: &str, agent: &str, binding_identity: &[u8]) -> String {
+    digest_parts(
+        b"herdr-agent-context/pane-name/generation/v1",
+        &[terminal_id.as_bytes(), agent.as_bytes(), binding_identity],
     )
 }
 
@@ -501,7 +536,12 @@ fn validate_state(state: &PersistedState, expected_socket_digest: &str) -> Resul
     if state.socket_digest != expected_socket_digest {
         return Err(StateError::SocketMismatch);
     }
-    for (pane_digest, pane) in &state.panes {
+    validate_panes(&state.panes)?;
+    Ok(())
+}
+
+fn validate_panes(panes: &BTreeMap<String, PaneState>) -> Result<(), StateError> {
+    for (pane_digest, pane) in panes {
         validate_digest(pane_digest)?;
         validate_pane(pane)?;
     }
@@ -638,13 +678,12 @@ mod tests {
     const RAW_BINDING_IDENTITY: &str = "/synthetic/private/binding.jsonl";
 
     fn sample_pane_state() -> PaneState {
-        let identity_digest = digest_identity(RAW_PANE_ID, "pi", RAW_IDENTITY);
+        let identity_digest = digest_identity(RAW_TERMINAL_ID, "pi", RAW_IDENTITY);
         PaneState {
-            terminal_digest: digest_terminal(RAW_PANE_ID, RAW_TERMINAL_ID),
+            terminal_digest: digest_terminal(RAW_TERMINAL_ID),
             baseline: Some("Manual pane baseline".to_owned()),
             selection: Some(Selection {
                 generation_digest: digest_generation(
-                    RAW_PANE_ID,
                     RAW_TERMINAL_ID,
                     "pi",
                     RAW_BINDING_IDENTITY.as_bytes(),
@@ -821,6 +860,48 @@ mod tests {
             Err(StateError::SocketMismatch)
         ));
         assert_eq!(fs::read(file.path()).unwrap(), mismatched);
+    }
+
+    #[test]
+    fn rejects_duplicate_fields_in_final_schema() {
+        let temporary = tempdir().unwrap();
+        let (file, initial) = StateFile::open(temporary.path(), Path::new(SOCKET_A)).unwrap();
+        let state = sample_state(initial.socket_digest);
+        let serialized = serde_json::to_string(&state).unwrap();
+        let duplicate_field = serialized.replacen(
+            "\"schema_version\":1",
+            "\"schema_version\":1,\"schema_version\":1",
+            1,
+        );
+        let pane_key = digest_pane_id(RAW_PANE_ID);
+        let pane_entry = format!(
+            "{}:{}",
+            serde_json::to_string(&pane_key).unwrap(),
+            serde_json::to_string(&sample_pane_state()).unwrap()
+        );
+        let duplicate_pane =
+            serialized.replacen(&pane_entry, &format!("{pane_entry},{pane_entry}"), 1);
+        let pane = sample_pane_state();
+        let override_key = pane.overrides.keys().next().unwrap();
+        let override_entry = format!(
+            "{}:{}",
+            serde_json::to_string(override_key).unwrap(),
+            serde_json::to_string(pane.overrides.get(override_key).unwrap()).unwrap()
+        );
+        let duplicate_override = serialized.replacen(
+            &override_entry,
+            &format!("{override_entry},{override_entry}"),
+            1,
+        );
+
+        for duplicate in [duplicate_field, duplicate_pane, duplicate_override] {
+            write_owner_only(file.path(), duplicate.as_bytes());
+            assert!(matches!(
+                StateFile::open(temporary.path(), Path::new(SOCKET_A)),
+                Err(StateError::Malformed)
+            ));
+            assert_eq!(fs::read_to_string(file.path()).unwrap(), duplicate);
+        }
     }
 
     #[test]
