@@ -100,6 +100,22 @@ pub struct TabLayout {
     pub workspace_id: String,
     pub tab_id: String,
     pub focused_pane_id: String,
+    #[serde(default)]
+    pub panes: Vec<LayoutPane>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+pub struct LayoutPane {
+    pub pane_id: String,
+    pub rect: PaneRect,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+pub struct PaneRect {
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -107,6 +123,15 @@ pub struct SnapshotPane {
     pub pane_id: String,
     pub workspace_id: String,
     pub tab_id: String,
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+pub struct PaneLabelInfo {
+    pub pane_id: String,
+    #[serde(default)]
+    pub label: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -144,6 +169,15 @@ pub fn process_info_params(pane_id: &str) -> Value {
 
 pub fn tab_rename_params(tab_id: &str, label: &str) -> Value {
     json!({"tab_id": tab_id, "label": label})
+}
+
+pub fn pane_rename_params(pane_id: &str, label: Option<&str>) -> Value {
+    let mut params = Map::new();
+    params.insert("pane_id".into(), Value::String(pane_id.to_owned()));
+    if let Some(label) = label {
+        params.insert("label".into(), Value::String(label.to_owned()));
+    }
+    Value::Object(params)
 }
 
 pub fn metadata_params(
@@ -199,6 +233,11 @@ pub fn parse_session_snapshot(result: Value) -> Result<SessionSnapshot, serde_js
 
 pub fn parse_tab_info(result: Value) -> Result<TabInfo, serde_json::Error> {
     let value = result.get("tab").cloned().unwrap_or(result);
+    serde_json::from_value(value)
+}
+
+pub fn parse_pane_label_info(result: Value) -> Result<PaneLabelInfo, serde_json::Error> {
+    let value = result.get("pane").cloned().unwrap_or(result);
     serde_json::from_value(value)
 }
 
@@ -303,11 +342,18 @@ mod tests {
                     {"tab_id":"w1:t2","workspace_id":"w1","number":9,"label":"two","focused":false,"pane_count":1,"agent_status":"idle"}
                 ],
                 "layouts": [
-                    {"workspace_id":"w1","tab_id":"w1:t1","focused_pane_id":"w1:p2","future":true},
-                    {"workspace_id":"w1","tab_id":"w1:t2","focused_pane_id":"w1:p3"}
+                    {
+                        "workspace_id":"w1","tab_id":"w1:t1","focused_pane_id":"w1:p2",
+                        "panes":[
+                            {"pane_id":"w1:p2","focused":true,"rect":{"x":40,"y":1,"width":40,"height":20}},
+                            {"pane_id":"w1:p1","focused":false,"rect":{"x":0,"y":1,"width":40,"height":20}}
+                        ],
+                        "future":true
+                    },
+                    {"workspace_id":"w1","tab_id":"w1:t2","focused_pane_id":"w1:p3","panes":[]}
                 ],
                 "workspaces": [],
-                "panes": [{"pane_id":"w1:p2","workspace_id":"w1","tab_id":"w1:t1"}],
+                "panes": [{"pane_id":"w1:p2","workspace_id":"w1","tab_id":"w1:t1","label":null}],
                 "agents": [], "future": true
             }
         }))
@@ -315,8 +361,11 @@ mod tests {
         assert_eq!(snapshot.tabs[0].tab_id, "w1:t1");
         assert_eq!(snapshot.tabs[0].number, 7);
         assert_eq!(snapshot.layouts[0].focused_pane_id, "w1:p2");
+        assert_eq!(snapshot.layouts[0].panes[0].rect.x, 40);
+        assert_eq!(snapshot.layouts[0].panes[1].pane_id, "w1:p1");
         assert_eq!(snapshot.layouts[1].tab_id, "w1:t2");
         assert_eq!(snapshot.panes[0].tab_id, "w1:t1");
+        assert_eq!(snapshot.panes[0].label, None);
 
         assert_eq!(
             tab_rename_params("w1:t1", "title"),
@@ -328,6 +377,36 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(tab.label, "title");
+
+        assert_eq!(
+            pane_rename_params("w1:p1", Some("pane title")),
+            json!({"pane_id":"w1:p1","label":"pane title"})
+        );
+        assert_eq!(
+            pane_rename_params("w1:p1", None),
+            json!({"pane_id":"w1:p1"})
+        );
+        let pane = parse_pane_label_info(json!({
+            "type":"pane_info",
+            "pane":{
+                "pane_id":"w1:p1","terminal_id":"term-1","workspace_id":"w1",
+                "tab_id":"w1:t1","focused":true,"label":"pane title",
+                "agent_status":"working","revision":1
+            }
+        }))
+        .unwrap();
+        assert_eq!(pane.pane_id, "w1:p1");
+        assert_eq!(pane.label.as_deref(), Some("pane title"));
+        let cleared = parse_pane_label_info(json!({
+            "type":"pane_info",
+            "pane":{
+                "pane_id":"w1:p1","terminal_id":"term-1","workspace_id":"w1",
+                "tab_id":"w1:t1","focused":true,
+                "agent_status":"working","revision":2
+            }
+        }))
+        .unwrap();
+        assert_eq!(cleared.label, None);
 
         assert!(
             parse_session_snapshot(json!({

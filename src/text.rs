@@ -2,7 +2,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 pub const DISPLAY_LIMIT: usize = 80;
-pub const TAB_LABEL_WIDTH: usize = 15;
+pub const CONTEXT_LABEL_WIDTH: usize = 20;
 
 pub fn complete_line(value: &str) -> Option<String> {
     value
@@ -16,13 +16,13 @@ pub fn display_line(value: &str) -> Option<String> {
     bounded_line(value, 0)
 }
 
-pub fn tab_label(value: &str) -> Option<String> {
+pub fn context_label(value: &str) -> Option<String> {
     let line = complete_line(value)?;
-    if UnicodeWidthStr::width(line.as_str()) <= TAB_LABEL_WIDTH {
+    if UnicodeWidthStr::width(line.as_str()) <= CONTEXT_LABEL_WIDTH {
         return Some(line);
     }
 
-    let content_width = TAB_LABEL_WIDTH - UnicodeWidthStr::width("…");
+    let content_width = CONTEXT_LABEL_WIDTH - UnicodeWidthStr::width("…");
     let mut width = 0;
     let mut output = String::new();
     for grapheme in line.graphemes(true) {
@@ -35,6 +35,10 @@ pub fn tab_label(value: &str) -> Option<String> {
     }
     output.push('…');
     Some(output)
+}
+
+pub fn tab_label(value: &str) -> Option<String> {
+    context_label(value)
 }
 
 pub fn quoted_display_line(value: &str) -> Option<String> {
@@ -89,20 +93,26 @@ mod tests {
     }
 
     #[test]
-    fn bounds_tab_labels_by_grapheme_display_width() {
-        assert_eq!(tab_label("abcdefghijklmno"), Some("abcdefghijklmno".into()));
+    fn bounds_context_labels_to_twenty_grapheme_safe_terminal_columns() {
         assert_eq!(
-            tab_label("abcdefghijklmnop"),
-            Some("abcdefghijklmn…".into())
-        );
-        assert_eq!(tab_label("界界界界界界界"), Some("界界界界界界界".into()));
-        assert_eq!(
-            tab_label("界界界界界界界界"),
-            Some("界界界界界界界…".into())
+            context_label("abcdefghijklmnopqrst"),
+            Some("abcdefghijklmnopqrst".into())
         );
         assert_eq!(
-            tab_label("👨‍👩‍👧‍👦 family planning notes"),
-            Some("👨‍👩‍👧‍👦 family plan…".into())
+            context_label("abcdefghijklmnopqrstu"),
+            Some("abcdefghijklmnopqrs…".into())
+        );
+        assert_eq!(
+            context_label("界界界界界界界界界界"),
+            Some("界界界界界界界界界界".into())
+        );
+        assert_eq!(
+            context_label("界界界界界界界界界界界"),
+            Some("界界界界界界界界界…".into())
+        );
+        assert_eq!(
+            context_label("👨‍👩‍👧‍👦 family planning notes"),
+            Some("👨‍👩‍👧‍👦 family planning …".into())
         );
     }
 
@@ -114,6 +124,6 @@ mod tests {
         let sidebar = display_line(&source).unwrap();
         assert_eq!(sidebar.chars().count(), 80);
         assert!(sidebar.ends_with('…'));
-        assert_eq!(tab_label(&source), Some(grapheme));
+        assert_eq!(context_label(&source), Some(grapheme));
     }
 }

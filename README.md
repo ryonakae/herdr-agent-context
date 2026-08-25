@@ -88,7 +88,7 @@ enabled = true
 
 The listener labels each tab from the supported Pi or Claude Code pane that has focus inside it, including background tabs. Pi uses its resolved session name. Claude uses its verified custom or generated title. Until Claude writes one of those title records, the tab keeps its baseline label. Agent status does not affect label eligibility.
 
-Generated labels occupy at most 15 terminal columns and preserve grapheme clusters. Focus changes wait 150 milliseconds so rapid switches apply only the final pane. Focusing a shell or unsupported pane keeps the last selected supported session while that session remains in the tab.
+Generated labels occupy at most 20 terminal columns and preserve grapheme clusters. Focus changes wait 150 milliseconds so rapid switches apply only the final pane. Focusing a shell or unsupported pane keeps the last selected supported session while that session remains in the tab.
 
 A manual Herdr tab rename overrides the selected session in that tab. Another session may use its generated label; returning to the overridden session restores the manual label. When the selected session leaves, or when you set `enabled = false`, the listener restores the latest manual baseline. If the initially captured label equals the tab's current workspace-local position, the listener treats it as Herdr's positional label and restores the new position after reordering. A numeric label entered later stays exact. Herdr stores a restored position as a custom label because version 0.8 has no API to clear custom naming.
 

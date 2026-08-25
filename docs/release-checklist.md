@@ -131,7 +131,7 @@ herdr agent prompt context_claude "Reply with a short synthetic Claude status." 
 ### Shared behavior
 
 - [x] Multiline values stay on one row; exactly 80 scalars remain unchanged and longer values truncate to 79 scalars plus an ellipsis.
-- [x] Sidebar and tab bounds derive independently from one complete title; a grapheme over 80 scalars stays intact when it fits the 15-column tab limit.
+- [x] Sidebar and tab bounds derive independently from one complete title; a grapheme over 80 scalars stays intact when it fits the 20-column tab limit.
 - [x] Stopping the listener lets metadata expire after TTL; restart performs a full sync.
 - [x] Replacing a pane terminal identity clears the prior terminal's owned metadata.
 - [x] Socket disconnect/reconnect performs a new full sync with a fresh sequence epoch.
@@ -143,7 +143,7 @@ herdr agent prompt context_claude "Reply with a short synthetic Claude status." 
 Keep the default-off check separate from the opt-in checks. For the opt-in smoke, back up the plugin's `config.toml`, add `[tab_name] enabled = true`, and restore the exact original file before cleanup. Use only the disposable named session and synthetic agents created above.
 
 - [x] With `[tab_name]` omitted, the listener sends no `session.snapshot` or `tab.rename` request and tab-only events do not refresh metadata.
-- [x] Generated labels use the Pi name or verified Claude title, preserve grapheme clusters, and occupy at most 15 terminal columns.
+- [x] Generated labels use the Pi name or verified Claude title, preserve grapheme clusters, and occupy at most 20 terminal columns.
 - [x] A background tab follows its own `focused_pane_id`; rapid focus changes apply only the final pane after 150 milliseconds without moving the absolute poll deadline.
 - [x] Focusing a shell retains the last selected live agent and does not choose another agent in the tab.
 - [x] A manual rename suppresses only the selected session in that tab. Another session can acquire the tab, and returning restores the exact manual label.

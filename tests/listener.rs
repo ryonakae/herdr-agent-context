@@ -1,9 +1,9 @@
 use herdr_agent_context::config::Config;
 use herdr_agent_context::herdr::protocol::{
-    AgentInfo, AgentSessionInfo, LAST_MESSAGE_TOKEN, ProcessInfo, SESSION_NAME_TOKEN,
-    SessionSnapshot, SnapshotPane, TabInfo, TabLayout,
+    AgentInfo, AgentSessionInfo, LAST_MESSAGE_TOKEN, PaneLabelInfo, ProcessInfo,
+    SESSION_NAME_TOKEN, SessionSnapshot, SnapshotPane, TabInfo, TabLayout,
 };
-use herdr_agent_context::herdr::socket::{EventPoll, SocketTransport};
+use herdr_agent_context::herdr::socket::{EventPoll, SocketError, SocketTransport};
 use herdr_agent_context::herdr::{HerdrApi, MetadataReport};
 use herdr_agent_context::runtime::Runtime;
 use serde_json::{Value, json};
@@ -42,6 +42,7 @@ struct FakeApi {
     snapshot_delay: Option<Duration>,
     fail_snapshot_topology: bool,
     renames: Vec<(String, String)>,
+    pane_renames: Vec<(String, Option<String>)>,
     reports: Vec<Report>,
     fail_next_clear: bool,
 }
@@ -91,6 +92,27 @@ impl HerdrApi for FakeApi {
             .unwrap();
         tab.label = label.to_owned();
         Ok(tab.clone())
+    }
+
+    fn rename_pane(
+        &mut self,
+        pane_id: &str,
+        label: Option<&str>,
+    ) -> Result<PaneLabelInfo, Self::Error> {
+        let label = label.map(ToOwned::to_owned);
+        self.pane_renames.push((pane_id.to_owned(), label.clone()));
+        if let Some(pane) = self
+            .snapshot
+            .panes
+            .iter_mut()
+            .find(|pane| pane.pane_id == pane_id)
+        {
+            pane.label = label.clone();
+        }
+        Ok(PaneLabelInfo {
+            pane_id: pane_id.to_owned(),
+            label,
+        })
     }
 
     fn report_metadata(&mut self, report: MetadataReport<'_>) -> Result<(), Self::Error> {
@@ -150,6 +172,7 @@ fn snapshot_pane(pane_id: &str, workspace_id: &str, tab_id: &str) -> SnapshotPan
         pane_id: pane_id.into(),
         workspace_id: workspace_id.into(),
         tab_id: tab_id.into(),
+        label: None,
     }
 }
 
@@ -166,6 +189,7 @@ fn fake_api() -> FakeApi {
         snapshot_delay: None,
         fail_snapshot_topology: false,
         renames: Vec::new(),
+        pane_renames: Vec::new(),
         reports: Vec::new(),
         fail_next_clear: false,
     }
@@ -270,11 +294,13 @@ fn tab_name_runtime_renames_from_each_tabs_internal_focus() {
                 workspace_id: "w1".into(),
                 tab_id: "w1:t1".into(),
                 focused_pane_id: "w1:p-shell".into(),
+                panes: Vec::new(),
             },
             TabLayout {
                 workspace_id: "w1".into(),
                 tab_id: "w1:t2".into(),
                 focused_pane_id: "w1:p1".into(),
+                panes: Vec::new(),
             },
         ],
         panes: vec![
@@ -347,6 +373,7 @@ fn tab_name_runtime_debounces_focus_without_delaying_metadata() {
             workspace_id: "w1".into(),
             tab_id: "w1:t1".into(),
             focused_pane_id: "w1:p1".into(),
+            panes: Vec::new(),
         }],
         panes: vec![
             snapshot_pane("w1:p1", "w1", "w1:t1"),
@@ -411,6 +438,7 @@ fn tab_name_stale_pane_membership_retries_without_disabling_sync() {
             workspace_id: "w1".into(),
             tab_id: "w1:t1".into(),
             focused_pane_id: "w1:p1".into(),
+            panes: Vec::new(),
         }],
         panes: vec![snapshot_pane("w1:p1", "w1", "w1:t1")],
     };
@@ -440,11 +468,13 @@ fn tab_name_stale_pane_membership_retries_without_disabling_sync() {
             workspace_id: "w1".into(),
             tab_id: "w1:t1".into(),
             focused_pane_id: "w1:p-shell".into(),
+            panes: Vec::new(),
         },
         TabLayout {
             workspace_id: "w1".into(),
             tab_id: "w1:t2".into(),
             focused_pane_id: "w1:p1".into(),
+            panes: Vec::new(),
         },
     ];
     api.snapshot.panes = vec![
@@ -526,6 +556,7 @@ fn tab_name_state_failure_disables_only_tab_sync() {
             workspace_id: "w1".into(),
             tab_id: "w1:t1".into(),
             focused_pane_id: "w1:p1".into(),
+            panes: Vec::new(),
         }],
         panes: vec![snapshot_pane("w1:p1", "w1", "w1:t1")],
     };
@@ -579,11 +610,13 @@ fn tab_name_unknown_focus_is_scoped_to_its_workspace() {
                 workspace_id: "w1".into(),
                 tab_id: "w1:t1".into(),
                 focused_pane_id: "w1:p1".into(),
+                panes: Vec::new(),
             },
             TabLayout {
                 workspace_id: "w2".into(),
                 tab_id: "w2:t1".into(),
                 focused_pane_id: "w2:p-shell".into(),
+                panes: Vec::new(),
             },
         ],
         panes: vec![
@@ -659,6 +692,7 @@ fn tab_name_disable_hides_unowned_focus_deadline() {
             workspace_id: "w1".into(),
             tab_id: "w1:t1".into(),
             focused_pane_id: "w1:p-shell".into(),
+            panes: Vec::new(),
         }],
         panes: vec![snapshot_pane("w1:p-shell", "w1", "w1:t1")],
     };
@@ -689,6 +723,7 @@ fn tab_name_runtime_restores_manual_event_overwritten_by_plugin_rpc() {
             workspace_id: "w1".into(),
             tab_id: "w1:t1".into(),
             focused_pane_id: "w1:p1".into(),
+            panes: Vec::new(),
         }],
         panes: vec![snapshot_pane("w1:p1", "w1", "w1:t1")],
     };
@@ -833,6 +868,7 @@ fn tab_name_changed_unresolved_claude_identity_restores_baseline() {
                 workspace_id: "w1".into(),
                 tab_id: "w1:t1".into(),
                 focused_pane_id: "w1:p2".into(),
+                panes: Vec::new(),
             }],
             panes: vec![snapshot_pane("w1:p2", "w1", "w1:t1")],
         },
@@ -1954,7 +1990,8 @@ fn socket_transport_subscribes_first_buffers_events_and_uses_exact_metadata_cont
         writeln!(event_writer, "not-json").unwrap();
         event_writer.flush().unwrap();
 
-        for _ in 0..5 {
+        let mut pane_rename_count = 0;
+        for _ in 0..9 {
             let (rpc_stream, _) = listener.accept().unwrap();
             let mut rpc_reader = BufReader::new(rpc_stream.try_clone().unwrap());
             let mut rpc_writer = rpc_stream;
@@ -1993,6 +2030,24 @@ fn socket_transport_subscribes_first_buffers_events_and_uses_exact_metadata_cont
                     "type":"tab_info",
                     "tab":{"tab_id":"w1:t1","workspace_id":"w1","number":1,"label":"context","focused":true,"pane_count":1,"agent_status":"working"}
                 }),
+                "pane.rename" => {
+                    pane_rename_count += 1;
+                    let pane_id = if pane_rename_count == 3 {
+                        "w1:p-other"
+                    } else {
+                        "w1:p1"
+                    };
+                    let mut pane = json!({
+                        "pane_id":pane_id,"terminal_id":"term-1","workspace_id":"w1",
+                        "tab_id":"w1:t1","focused":true,"agent_status":"working","revision":3
+                    });
+                    if pane_rename_count == 4 {
+                        pane["label"] = json!("wrong label");
+                    } else if let Some(label) = request["params"].get("label") {
+                        pane["label"] = label.clone();
+                    }
+                    json!({"type":"pane_info","pane":pane})
+                }
                 "pane.report_metadata" => json!({"type": "pane_metadata_reported"}),
                 method => panic!("unexpected method {method}"),
             };
@@ -2033,6 +2088,23 @@ fn socket_transport_subscribes_first_buffers_events_and_uses_exact_metadata_cont
         transport.rename_tab("w1:t1", "context").unwrap().label,
         "context"
     );
+    assert_eq!(
+        transport
+            .rename_pane("w1:p1", Some("pane context"))
+            .unwrap()
+            .label
+            .as_deref(),
+        Some("pane context")
+    );
+    assert_eq!(transport.rename_pane("w1:p1", None).unwrap().label, None);
+    assert!(matches!(
+        transport.rename_pane("w1:p1", Some("pane context")),
+        Err(SocketError::Protocol)
+    ));
+    assert!(matches!(
+        transport.rename_pane("w1:p1", Some("pane context")),
+        Err(SocketError::Protocol)
+    ));
     transport
         .report_metadata(MetadataReport {
             agent: "claude",
@@ -2061,6 +2133,17 @@ fn socket_transport_subscribes_first_buffers_events_and_uses_exact_metadata_cont
         rename["params"],
         json!({"tab_id":"w1:t1","label":"context"})
     );
+    let pane_renames: Vec<_> = requests
+        .iter()
+        .filter(|request| request["method"] == "pane.rename")
+        .collect();
+    assert_eq!(pane_renames.len(), 4);
+    assert_eq!(
+        pane_renames[0]["params"],
+        json!({"pane_id":"w1:p1","label":"pane context"})
+    );
+    assert_eq!(pane_renames[1]["params"], json!({"pane_id":"w1:p1"}));
+    assert!(pane_renames[1]["params"].get("label").is_none());
     let report = requests
         .iter()
         .find(|request| request["method"] == "pane.report_metadata")

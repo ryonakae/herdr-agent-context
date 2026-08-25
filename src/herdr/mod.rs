@@ -1,7 +1,7 @@
 pub mod protocol;
 pub mod socket;
 
-use protocol::{AgentInfo, ProcessInfo, SessionSnapshot, TabInfo};
+use protocol::{AgentInfo, PaneLabelInfo, ProcessInfo, SessionSnapshot, TabInfo};
 
 pub struct MetadataReport<'a> {
     pub agent: &'a str,
@@ -32,6 +32,11 @@ pub trait HerdrApi {
     fn process_info(&mut self, pane_id: &str) -> Result<ProcessInfo, Self::Error>;
     fn session_snapshot(&mut self) -> Result<SessionSnapshot, Self::Error>;
     fn rename_tab(&mut self, tab_id: &str, label: &str) -> Result<TabInfo, Self::Error>;
+    fn rename_pane(
+        &mut self,
+        pane_id: &str,
+        label: Option<&str>,
+    ) -> Result<PaneLabelInfo, Self::Error>;
     fn report_metadata(&mut self, report: MetadataReport<'_>) -> Result<(), Self::Error>;
 }
 
@@ -67,6 +72,14 @@ impl HerdrApi for socket::SocketTransport {
 
     fn rename_tab(&mut self, tab_id: &str, label: &str) -> Result<TabInfo, Self::Error> {
         self.rename_tab(tab_id, label)
+    }
+
+    fn rename_pane(
+        &mut self,
+        pane_id: &str,
+        label: Option<&str>,
+    ) -> Result<PaneLabelInfo, Self::Error> {
+        self.rename_pane(pane_id, label)
     }
 
     fn report_metadata(&mut self, report: MetadataReport<'_>) -> Result<(), Self::Error> {

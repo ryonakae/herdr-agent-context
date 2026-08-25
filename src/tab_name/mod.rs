@@ -1880,6 +1880,6 @@ mod tests {
 
         assert_eq!(effects.len(), 1);
         assert_eq!(effects[0].tab_id(), "w1:t1");
-        assert_eq!(effects[0].label(), "a generated co…");
+        assert_eq!(effects[0].label(), "a generated context…");
     }
 }

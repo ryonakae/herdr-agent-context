@@ -1,5 +1,7 @@
 use super::MetadataReport;
-use super::protocol::{self, AgentInfo, HerdrEvent, ProcessInfo, SessionSnapshot, TabInfo};
+use super::protocol::{
+    self, AgentInfo, HerdrEvent, PaneLabelInfo, ProcessInfo, SessionSnapshot, TabInfo,
+};
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
 use std::net::Shutdown;
@@ -65,6 +67,21 @@ impl SocketTransport {
             .rpc
             .call("tab.rename", protocol::tab_rename_params(tab_id, label))?;
         protocol::parse_tab_info(result).map_err(SocketError::Json)
+    }
+
+    pub fn rename_pane(
+        &mut self,
+        pane_id: &str,
+        label: Option<&str>,
+    ) -> Result<PaneLabelInfo, SocketError> {
+        let result = self
+            .rpc
+            .call("pane.rename", protocol::pane_rename_params(pane_id, label))?;
+        let pane = protocol::parse_pane_label_info(result).map_err(SocketError::Json)?;
+        if pane.pane_id != pane_id || pane.label.as_deref() != label {
+            return Err(SocketError::Protocol);
+        }
+        Ok(pane)
     }
 
     pub fn report_metadata(&mut self, report: MetadataReport<'_>) -> Result<(), SocketError> {

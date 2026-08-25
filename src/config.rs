@@ -14,6 +14,11 @@ pub struct TabNameConfig {
     pub enabled: bool,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct PaneNameConfig {
+    pub enabled: bool,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Config {
     pub poll_interval_ms: u64,
@@ -21,6 +26,7 @@ pub struct Config {
     pub pi_session_dirs: Vec<PathBuf>,
     pub claude_session_dirs: Vec<PathBuf>,
     pub tab_name: TabNameConfig,
+    pub pane_name: PaneNameConfig,
 }
 
 impl Default for Config {
@@ -31,6 +37,7 @@ impl Default for Config {
             pi_session_dirs: Vec::new(),
             claude_session_dirs: Vec::new(),
             tab_name: TabNameConfig::default(),
+            pane_name: PaneNameConfig::default(),
         }
     }
 }
@@ -43,11 +50,18 @@ struct RawConfig {
     pi_session_dirs: Option<Vec<PathBuf>>,
     agents: Option<RawAgents>,
     tab_name: Option<RawTabNameConfig>,
+    pane_name: Option<RawPaneNameConfig>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawTabNameConfig {
+    enabled: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawPaneNameConfig {
     enabled: Option<bool>,
 }
 
@@ -169,6 +183,12 @@ impl Config {
                 enabled: raw
                     .tab_name
                     .and_then(|tab_name| tab_name.enabled)
+                    .unwrap_or(false),
+            },
+            pane_name: PaneNameConfig {
+                enabled: raw
+                    .pane_name
+                    .and_then(|pane_name| pane_name.enabled)
                     .unwrap_or(false),
             },
         };
@@ -308,28 +328,22 @@ mod tests {
     }
 
     #[test]
-    fn tab_name_sync_is_strict_and_disabled_by_default() {
+    fn label_sync_is_strict_independent_and_disabled_by_default() {
         let home = Path::new("/home/me");
-        assert!(!Config::from_toml("", home).unwrap().tab_name.enabled);
-        assert!(
-            !Config::from_toml("[tab_name]", home)
-                .unwrap()
-                .tab_name
-                .enabled
-        );
-        assert!(
-            Config::from_toml("[tab_name]\nenabled = true", home)
-                .unwrap()
-                .tab_name
-                .enabled
-        );
-        assert!(
-            !Config::from_toml("[tab_name]\nenabled = false", home)
-                .unwrap()
-                .tab_name
-                .enabled
-        );
+        let defaults = Config::from_toml("", home).unwrap();
+        assert!(!defaults.tab_name.enabled);
+        assert!(!defaults.pane_name.enabled);
+
+        let tab_only = Config::from_toml("[tab_name]\nenabled = true", home).unwrap();
+        assert!(tab_only.tab_name.enabled);
+        assert!(!tab_only.pane_name.enabled);
+
+        let pane_only = Config::from_toml("[pane_name]\nenabled = true", home).unwrap();
+        assert!(!pane_only.tab_name.enabled);
+        assert!(pane_only.pane_name.enabled);
+
         assert!(Config::from_toml("[tab_name]\nwidth = 20", home).is_err());
+        assert!(Config::from_toml("[pane_name]\nwidth = 20", home).is_err());
     }
 
     #[test]
