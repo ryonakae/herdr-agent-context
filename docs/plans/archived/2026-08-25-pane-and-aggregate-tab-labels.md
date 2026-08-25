@@ -486,7 +486,7 @@ Implementers must update this list only after each task's validation succeeds. R
 - [x] Live isolated Herdr plugin smoke — N/A because named sessions share the global plugin registry; exact behavior is covered by 52 temporary Unix socket integration tests without mutating the active user's plugin state.
 - [x] Requirement Coverage has no missing requirement or decision.
 - [x] The plan and actual changed files agree; implementation differences are recorded in Tasks 1–5.
-- [ ] After every item above succeeds, move this file without renaming it to `docs/plans/archived/2026-08-25-pane-and-aggregate-tab-labels.md`.
+- [x] After every applicable item above succeeds, move this file without renaming it to `docs/plans/archived/2026-08-25-pane-and-aggregate-tab-labels.md`.
 
 ## Risks and Open Questions
 
