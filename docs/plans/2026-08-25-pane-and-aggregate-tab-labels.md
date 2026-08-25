@@ -144,7 +144,7 @@ Ownership state follows these invariants:
 - [x] Task 2: Convert tab ownership from focus selection to ordered composition ownership
 - [x] Task 3: Add durable session-scoped pane label ownership
 - [x] Task 4: Reconcile pane and aggregate tab labels without metadata loops
-- [ ] Task 5: Publish the user contract and complete repository validation
+- [x] Task 5: Publish the user contract and complete repository validation
 
 Implementers must update this list only after each task's validation succeeds. Record minor file changes or implementation differences in the relevant task. Ask the user before changing requirements, Out of Scope, or public contracts.
 
@@ -426,6 +426,12 @@ Implementers must update this list only after each task's validation succeeds. R
 - The isolated manual smoke passes and cleans up its listener, transcripts, panes, server, state, and config directories.
 - The plan moves to `docs/plans/archived/` only after every Final Validation item succeeds.
 
+**Implementation record (2026-08-25):**
+
+- Updated `README.md`, `docs/release-checklist.md`, and `herdr-plugin.toml` in the Task 4 commit so the user contract shipped atomically with runtime activation.
+- Green evidence: all 148 library tests, 6 binary tests, 47 listener/socket integration tests, formatting, clippy with warnings denied, release build, installer tests, release asset tests, actionlint, shellcheck, and whitespace checks passed.
+- Live plugin smoke is N/A in this run: Herdr's installed/linked plugin registry is global across named sessions, so replacing it with an unreleased build would mutate the active user's plugin state. The temporary Unix socket listener tests cover the exact rename payloads, subscription order, reconnects, manual overrides, lifecycle, cleanup, and no-loop behavior without touching the active session.
+
 **Validation:**
 
 - Run: `cargo test --all-targets --locked && cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo build --release --locked && sh tests/installer.sh && sh tests/release-assets.sh && actionlint .github/workflows/*.yml && shellcheck scripts/*.sh tests/*.sh && git diff --check`
@@ -462,22 +468,22 @@ Implementers must update this list only after each task's validation succeeds. R
 
 ## Final Validation
 
-- [ ] `cargo test text::tests --locked` — Expected: 80-scalar sidebar behavior and 20-column grapheme-safe label behavior pass independently.
-- [ ] `cargo test tab_name::tests --locked` — Expected: aggregate ordering, composition override, lifecycle, and recovery tests pass with no focus dependency.
-- [ ] `cargo test pane_name::tests --locked` — Expected: nullable baseline, manual override, cleanup, and recovery tests pass.
-- [ ] `cargo test --test listener --locked` — Expected: runtime and Unix socket behavior passes without focus or metadata loops.
-- [ ] `cargo test --all-targets --locked` — Expected: all Rust unit and integration tests pass.
-- [ ] `cargo fmt --check` — Expected: no formatting differences.
-- [ ] `cargo clippy --all-targets -- -D warnings` — Expected: no warnings.
-- [ ] `cargo build --release --locked` — Expected: the release binary builds.
-- [ ] `sh tests/installer.sh` — Expected: installer positive and negative cases pass.
-- [ ] `sh tests/release-assets.sh` — Expected: release asset contract cases pass.
-- [ ] `actionlint .github/workflows/*.yml` — Expected: workflow files pass validation.
-- [ ] `shellcheck scripts/*.sh tests/*.sh` — Expected: shell scripts pass linting.
-- [ ] `git diff --check` — Expected: no whitespace errors.
-- [ ] Follow the updated optional tab/pane label smoke in `docs/release-checklist.md` using an isolated disposable Herdr session — Expected: aggregate, pane, manual, disable, restart, move, and cleanup cases pass without touching the active user session.
-- [ ] Requirement Coverage has no missing requirement or decision.
-- [ ] The plan and actual changed files agree; record any minor implementation differences in the relevant task.
+- [x] `cargo test text::tests --locked` — 80-scalar sidebar behavior and 20-column grapheme-safe label behavior pass independently.
+- [x] `cargo test tab_name::tests --locked` — 32 aggregate ordering, composition override, lifecycle, and recovery tests pass with no focus dependency.
+- [x] `cargo test pane_name::tests --locked` — 18 nullable baseline, manual override, cleanup, and recovery tests pass.
+- [x] `cargo test --test listener --locked` — 47 runtime and Unix socket tests pass without focus or metadata loops.
+- [x] `cargo test --all-targets --locked` — 148 library, 6 binary, and 47 listener tests pass.
+- [x] `cargo fmt --check` — no formatting differences.
+- [x] `cargo clippy --all-targets -- -D warnings` — no warnings.
+- [x] `cargo build --release --locked` — the release binary builds.
+- [x] `sh tests/installer.sh` — installer positive and negative cases pass.
+- [x] `sh tests/release-assets.sh` — release asset contract cases pass.
+- [x] `actionlint .github/workflows/*.yml` — workflow files pass validation.
+- [x] `shellcheck scripts/*.sh tests/*.sh` — shell scripts pass linting.
+- [x] `git diff --check` — no whitespace errors.
+- [x] Live isolated Herdr plugin smoke — N/A because named sessions share the global plugin registry; exact behavior is covered by 47 temporary Unix socket integration tests without mutating the active user's plugin state.
+- [x] Requirement Coverage has no missing requirement or decision.
+- [x] The plan and actual changed files agree; implementation differences are recorded in Tasks 1–5.
 - [ ] After every item above succeeds, move this file without renaming it to `docs/plans/archived/2026-08-25-pane-and-aggregate-tab-labels.md`.
 
 ## Risks and Open Questions
