@@ -1,27 +1,27 @@
 mod state;
 
-use crate::text::tab_label;
+use crate::text::context_label;
 use state::{
     Applied, AppliedSource, Baseline, PendingDisposition, PendingTransition, PersistedState,
-    Selection, StateFile, TabState, digest_identity, digest_label,
+    Selection, StateFile, TabState, digest_composition, digest_contributor_generations,
+    digest_identity, digest_label,
 };
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use thiserror::Error;
-
-pub const FOCUS_DEBOUNCE: Duration = Duration::from_millis(150);
 
 pub struct TabSnapshot {
     pub tab_id: String,
     pub workspace_id: String,
     pub position: usize,
     pub observed_label: String,
-    pub focused_pane_id: String,
 }
 
 pub struct PaneSnapshot {
     pub pane_id: String,
+    pub terminal_id: String,
+    pub binding_identity: Option<Vec<u8>>,
     pub tab_id: String,
     pub context: PaneContext,
 }
@@ -33,6 +33,9 @@ pub struct TabRenameObservation {
 
 pub enum PaneContext {
     Unsupported,
+    Failed {
+        agent: String,
+    },
     Supported {
         agent: String,
         identity: String,
@@ -89,8 +92,24 @@ pub enum TabNameError {
 pub struct TabNameManager {
     state_file: StateFile,
     document: PersistedState,
-    focus_deadlines: HashMap<String, Instant>,
+    retained_components: HashMap<String, RetainedComponent>,
     expected_events: HashMap<String, VecDeque<String>>,
+}
+
+struct RetainedComponent {
+    identity_digest: String,
+    label: String,
+}
+
+#[derive(Clone)]
+struct Composition {
+    selection: Selection,
+    label: String,
+}
+
+struct IncompleteCompositionEvidence {
+    generation_digest: String,
+    identity_digest: Option<String>,
 }
 
 impl TabNameManager {
@@ -100,30 +119,13 @@ impl TabNameManager {
         Ok(Self {
             state_file,
             document,
-            focus_deadlines: HashMap::new(),
+            retained_components: HashMap::new(),
             expected_events: HashMap::new(),
         })
     }
 
     pub fn reset_event_expectations(&mut self) {
         self.expected_events.clear();
-    }
-
-    pub fn note_focus(&mut self, tab_id: &str, now: Instant) {
-        self.focus_deadlines
-            .insert(tab_id.to_owned(), now + FOCUS_DEBOUNCE);
-    }
-
-    pub fn next_deadline(&self) -> Option<Instant> {
-        self.focus_deadlines.values().copied().min()
-    }
-
-    pub fn defer_due_focus(&mut self, now: Instant) {
-        for deadline in self.focus_deadlines.values_mut() {
-            if *deadline <= now {
-                *deadline = now + FOCUS_DEBOUNCE;
-            }
-        }
     }
 
     pub fn needs_snapshot(&self, enabled: bool) -> bool {
@@ -137,15 +139,40 @@ impl TabNameManager {
         panes: &[PaneSnapshot],
     ) -> Result<(), TabNameError> {
         let before = self.document.clone();
+        let compositions = self.compositions(tabs, panes);
         let tabs_by_id: HashMap<_, _> = tabs.iter().map(|tab| (tab.tab_id.as_str(), tab)).collect();
         for observation in observations {
             let observed_digest = digest_label(&observation.label);
             if self.consume_expected_event(&observation.tab_id, &observed_digest) {
                 continue;
             }
-            let Some(tab) = tabs_by_id.get(observation.tab_id.as_str()) else {
+            let Some(tab) = tabs_by_id.get(observation.tab_id.as_str()).copied() else {
                 continue;
             };
+            let composition = compositions
+                .get(&observation.tab_id)
+                .and_then(Option::as_ref);
+            let incomplete_evidence = if self.document.cleanup_pending {
+                None
+            } else {
+                self.incomplete_composition_evidence(tab, panes)
+            };
+            let selection = self
+                .document
+                .tabs
+                .get(&observation.tab_id)
+                .and_then(|tab_state| {
+                    incomplete_evidence
+                        .as_ref()
+                        .and_then(|evidence| recover_incomplete_selection(tab_state, evidence))
+                        .or_else(|| {
+                            if incomplete_evidence.is_none() {
+                                composition.map(|value| value.selection.clone())
+                            } else {
+                                None
+                            }
+                        })
+                });
             let Some(tab_state) = self.document.tabs.get_mut(&observation.tab_id) else {
                 continue;
             };
@@ -172,7 +199,7 @@ impl TabNameManager {
                 .clone()
                 .or_else(|| pending_target.map(ToOwned::to_owned))
                 .or_else(|| applied_target.map(ToOwned::to_owned));
-            record_manual_label(tab_state, tab, panes, &observation.label);
+            record_manual_label(tab_state, selection.as_ref(), &observation.label);
             tab_state.stale_target_digest = stale_target_digest;
         }
         if self.document != before {
@@ -189,15 +216,13 @@ impl TabNameManager {
         enabled: bool,
         tabs: &[TabSnapshot],
         panes: &[PaneSnapshot],
-        now: Instant,
+        _now: Instant,
     ) -> Result<Vec<RenameEffect>, TabNameError> {
         let before = self.document.clone();
         let live_tabs: std::collections::HashSet<_> =
             tabs.iter().map(|tab| tab.tab_id.as_str()).collect();
         self.document
             .tabs
-            .retain(|tab_id, _| live_tabs.contains(tab_id.as_str()));
-        self.focus_deadlines
             .retain(|tab_id, _| live_tabs.contains(tab_id.as_str()));
         self.expected_events
             .retain(|tab_id, _| live_tabs.contains(tab_id.as_str()));
@@ -206,50 +231,49 @@ impl TabNameManager {
             self.document.cleanup_pending = true;
         }
         let acquiring = enabled && !self.document.cleanup_pending;
-        let panes_by_id: HashMap<_, _> = panes
-            .iter()
-            .map(|pane| (pane.pane_id.as_str(), pane))
-            .collect();
+        let compositions = self.compositions(tabs, panes);
         let mut effects = Vec::new();
         let mut release_tabs = Vec::new();
 
         for tab in tabs {
-            if !self.focus_deadlines.contains_key(&tab.tab_id) {
-                let focused_identity = panes_by_id
-                    .get(tab.focused_pane_id.as_str())
-                    .and_then(|pane| context_digest(pane, &tab.tab_id));
-                let selected_identity = self
-                    .document
-                    .tabs
-                    .get(&tab.tab_id)
-                    .and_then(|tab_state| tab_state.selection.as_ref())
-                    .map(|selection| selection.identity_digest.as_str());
-                if focused_identity.as_deref().is_some()
-                    && focused_identity.as_deref() != selected_identity
-                    && selected_identity.is_some()
-                {
-                    self.focus_deadlines
-                        .insert(tab.tab_id.clone(), now + FOCUS_DEBOUNCE);
-                }
-            }
-            let focus_blocked = self
-                .focus_deadlines
-                .get(&tab.tab_id)
-                .is_some_and(|deadline| now < *deadline);
-            if !focus_blocked {
-                self.focus_deadlines.remove(&tab.tab_id);
-            }
-
+            let generated_composition = compositions.get(&tab.tab_id).and_then(Option::as_ref);
+            let incomplete_evidence = if acquiring {
+                self.incomplete_composition_evidence(tab, panes)
+            } else {
+                None
+            };
+            let recovered_selection = self.document.tabs.get(&tab.tab_id).and_then(|tab_state| {
+                incomplete_evidence
+                    .as_ref()
+                    .and_then(|evidence| recover_incomplete_selection(tab_state, evidence))
+            });
+            let composition = if incomplete_evidence.is_none() {
+                generated_composition
+            } else {
+                None
+            };
+            let active_selection = recovered_selection
+                .clone()
+                .or_else(|| composition.map(|composition| composition.selection.clone()));
             let observation = self
                 .document
                 .tabs
                 .get_mut(&tab.tab_id)
                 .map_or(Observation::Retained, |tab_state| {
-                    recover_observation(tab_state, tab, panes)
+                    recover_observation(tab_state, tab, active_selection.as_ref())
                 });
             if observation == Observation::Released {
                 release_tabs.push(tab.tab_id.clone());
                 continue;
+            }
+            if let (Some(selection), Some(tab_state)) = (
+                recovered_selection.as_ref(),
+                self.document.tabs.get_mut(&tab.tab_id),
+            ) {
+                if observed_owned_selection_matches(tab_state, tab, selection) {
+                    tab_state.selection = Some(selection.clone());
+                    continue;
+                }
             }
             if self
                 .document
@@ -266,13 +290,13 @@ impl TabNameManager {
                     tab_state.pending = None;
                 } else {
                     let pending = tab_state.pending.clone().unwrap();
-                    if let Some(target) = pending_target_label(tab_state, tab, panes, &pending) {
-                        if matches!(&pending.disposition, PendingDisposition::Release)
-                            && digest_label(&target) == digest_label(&tab.observed_label)
-                        {
-                            release_tabs.push(tab.tab_id.clone());
-                            continue;
-                        }
+                    if let Some(target) = pending_target_label(
+                        tab_state,
+                        tab,
+                        composition,
+                        active_selection.as_ref(),
+                        &pending,
+                    ) {
                         plan_target(
                             &tab.tab_id,
                             &tab.observed_label,
@@ -283,12 +307,9 @@ impl TabNameManager {
                         );
                         continue;
                     }
-                    if !pending_generated_focus_changed(&pending, tab, panes)
-                        && pending_generated_identity_is_live(&pending, tab, panes)
-                    {
-                        continue;
+                    if recovered_selection.is_none() {
+                        tab_state.pending = None;
                     }
-                    tab_state.pending = None;
                 }
             }
 
@@ -299,7 +320,7 @@ impl TabNameManager {
                 if observation != Observation::StaleTarget
                     && observed_is_manual(tab_state, &tab.observed_label)
                 {
-                    record_manual(tab_state, tab, panes);
+                    record_manual(tab_state, active_selection.as_ref(), &tab.observed_label);
                     release_tabs.push(tab.tab_id.clone());
                     continue;
                 }
@@ -317,25 +338,13 @@ impl TabNameManager {
             }
 
             if !self.document.tabs.contains_key(&tab.tab_id) {
-                if focus_blocked {
-                    continue;
-                }
-                let Some(pane) = panes_by_id.get(tab.focused_pane_id.as_str()) else {
+                let Some(composition) = composition else {
                     continue;
                 };
-                let Some((identity_digest, title)) = resolved_context(pane, &tab.tab_id) else {
-                    continue;
-                };
-                let Some(label) = tab_label(title) else {
-                    continue;
-                };
-                let baseline = capture_baseline(tab);
+                let identity_digest = composition.selection.identity_digest.clone();
                 let state = TabState {
-                    baseline,
-                    selection: Some(Selection {
-                        pane_id: pane.pane_id.clone(),
-                        identity_digest: identity_digest.clone(),
-                    }),
+                    baseline: capture_baseline(tab),
+                    selection: Some(composition.selection.clone()),
                     overrides: BTreeMap::new(),
                     applied: Some(Applied {
                         target_digest: digest_label(&tab.observed_label),
@@ -350,7 +359,7 @@ impl TabNameManager {
                 plan_target(
                     &tab.tab_id,
                     &tab.observed_label,
-                    label,
+                    composition.label.clone(),
                     PendingDisposition::Keep {
                         source: AppliedSource::Generated { identity_digest },
                     },
@@ -361,88 +370,63 @@ impl TabNameManager {
             }
 
             let tab_state = self.document.tabs.get_mut(&tab.tab_id).unwrap();
-            let selection_changed = if focus_blocked {
-                false
-            } else {
-                adopt_focused_selection(tab_state, tab, &panes_by_id)
-            };
-            if !selection_is_live(tab_state, &tab.tab_id, panes) {
-                tab_state.selection = None;
-            }
-            let Some(selection) = tab_state.selection.clone() else {
-                let target = baseline_label(&tab_state.baseline, tab.position);
-                if plan_release(
-                    &tab.tab_id,
-                    &tab.observed_label,
-                    target,
-                    tab_state,
-                    &mut effects,
-                ) {
-                    release_tabs.push(tab.tab_id.clone());
-                }
-                continue;
-            };
-            let selected = panes.iter().find(|pane| {
-                pane.pane_id == selection.pane_id
-                    && pane.tab_id == tab.tab_id
-                    && context_digest(pane, &tab.tab_id).as_deref()
-                        == Some(selection.identity_digest.as_str())
-            });
-            let Some(selected) = selected else {
-                continue;
-            };
-            if let Some(label) = tab_state.overrides.get(&selection.identity_digest).cloned() {
-                plan_target(
-                    &tab.tab_id,
-                    &tab.observed_label,
-                    label,
-                    PendingDisposition::Keep {
-                        source: AppliedSource::Override {
-                            identity_digest: selection.identity_digest,
-                        },
-                    },
-                    tab_state,
-                    &mut effects,
-                );
-                continue;
-            }
-            match &selected.context {
-                PaneContext::Supported {
-                    display: DisplayState::Resolved(title),
-                    ..
-                } => {
-                    if let Some(label) = tab_label(title) {
-                        plan_target(
-                            &tab.tab_id,
-                            &tab.observed_label,
-                            label,
-                            PendingDisposition::Keep {
-                                source: AppliedSource::Generated {
-                                    identity_digest: selection.identity_digest,
-                                },
-                            },
-                            tab_state,
-                            &mut effects,
-                        );
-                    }
-                }
-                PaneContext::Supported {
-                    display: DisplayState::Unresolved | DisplayState::Failed,
-                    ..
-                } if selection_changed => {
-                    let target = baseline_label(&tab_state.baseline, tab.position);
+            if let Some(selection) = recovered_selection {
+                tab_state.selection = Some(selection.clone());
+                let identity_digest = selection.identity_digest;
+                if let Some(label) = tab_state.overrides.get(&identity_digest).cloned() {
                     plan_target(
                         &tab.tab_id,
                         &tab.observed_label,
-                        target,
+                        label,
                         PendingDisposition::Keep {
-                            source: AppliedSource::Baseline,
+                            source: AppliedSource::Override { identity_digest },
                         },
                         tab_state,
                         &mut effects,
                     );
                 }
-                PaneContext::Supported { .. } | PaneContext::Unsupported => {}
+                continue;
+            }
+            let Some(composition) = composition else {
+                tab_state.selection = None;
+                let target = baseline_label(&tab_state.baseline, tab.position);
+                plan_target(
+                    &tab.tab_id,
+                    &tab.observed_label,
+                    target,
+                    PendingDisposition::Keep {
+                        source: AppliedSource::Baseline,
+                    },
+                    tab_state,
+                    &mut effects,
+                );
+                continue;
+            };
+
+            tab_state.selection = Some(composition.selection.clone());
+            let identity_digest = composition.selection.identity_digest.clone();
+            if let Some(label) = tab_state.overrides.get(&identity_digest).cloned() {
+                plan_target(
+                    &tab.tab_id,
+                    &tab.observed_label,
+                    label,
+                    PendingDisposition::Keep {
+                        source: AppliedSource::Override { identity_digest },
+                    },
+                    tab_state,
+                    &mut effects,
+                );
+            } else {
+                plan_target(
+                    &tab.tab_id,
+                    &tab.observed_label,
+                    composition.label.clone(),
+                    PendingDisposition::Keep {
+                        source: AppliedSource::Generated { identity_digest },
+                    },
+                    tab_state,
+                    &mut effects,
+                );
             }
         }
 
@@ -544,6 +528,182 @@ impl TabNameManager {
         true
     }
 
+    fn compositions(
+        &mut self,
+        tabs: &[TabSnapshot],
+        panes: &[PaneSnapshot],
+    ) -> HashMap<String, Option<Composition>> {
+        let live_generations: std::collections::HashSet<_> = panes
+            .iter()
+            .filter_map(contributor_generation_digest)
+            .collect();
+        self.retained_components
+            .retain(|generation, _| live_generations.contains(generation));
+
+        tabs.iter()
+            .map(|tab| (tab.tab_id.clone(), self.composition(tab, panes)))
+            .collect()
+    }
+
+    fn incomplete_composition_evidence(
+        &self,
+        tab: &TabSnapshot,
+        panes: &[PaneSnapshot],
+    ) -> Option<IncompleteCompositionEvidence> {
+        let mut identities = Vec::new();
+        let mut generations = Vec::new();
+        let mut incomplete = false;
+        let mut all_identities_known = true;
+        for pane in panes.iter().filter(|pane| pane.tab_id == tab.tab_id) {
+            let Some(binding_identity) = pane.binding_identity.as_deref() else {
+                continue;
+            };
+            let (agent, identity, contributes) = match &pane.context {
+                PaneContext::Unsupported => continue,
+                PaneContext::Failed { agent } => {
+                    incomplete = true;
+                    (agent.as_str(), None, true)
+                }
+                PaneContext::Supported {
+                    agent,
+                    identity,
+                    display,
+                } => {
+                    let contributes = match display {
+                        DisplayState::Resolved(title) => context_label(title).is_some(),
+                        DisplayState::Failed => {
+                            let pane_identity = digest_identity("", agent, identity);
+                            let generation = contributor_generation_digest(pane)?;
+                            let retained = self
+                                .retained_components
+                                .get(&generation)
+                                .is_some_and(|retained| retained.identity_digest == pane_identity);
+                            incomplete |= !retained;
+                            true
+                        }
+                        DisplayState::Unresolved => false,
+                    };
+                    (agent.as_str(), Some(identity.as_str()), contributes)
+                }
+            };
+            if contributes {
+                if let Some(identity) = identity {
+                    identities.push((agent, identity));
+                } else {
+                    all_identities_known = false;
+                }
+                generations.push((
+                    pane.pane_id.as_str(),
+                    pane.terminal_id.as_str(),
+                    agent,
+                    binding_identity,
+                ));
+            }
+        }
+        if !incomplete || generations.is_empty() {
+            return None;
+        }
+        let identity_digest =
+            all_identities_known.then(|| digest_composition(&tab.tab_id, &identities));
+        Some(IncompleteCompositionEvidence {
+            generation_digest: digest_contributor_generations(&generations),
+            identity_digest,
+        })
+    }
+
+    fn composition(&mut self, tab: &TabSnapshot, panes: &[PaneSnapshot]) -> Option<Composition> {
+        struct Contributor<'a> {
+            pane_id: &'a str,
+            terminal_id: &'a str,
+            agent: &'a str,
+            binding_identity: &'a [u8],
+            identity: &'a str,
+            label: String,
+        }
+
+        let mut contributors = Vec::new();
+        for pane in panes.iter().filter(|pane| pane.tab_id == tab.tab_id) {
+            let Some(generation) = contributor_generation_digest(pane) else {
+                continue;
+            };
+            let PaneContext::Supported {
+                agent,
+                identity,
+                display,
+            } = &pane.context
+            else {
+                continue;
+            };
+            let Some(binding_identity) = pane.binding_identity.as_deref() else {
+                continue;
+            };
+            let pane_identity = digest_identity("", agent, identity);
+            let label = match display {
+                DisplayState::Resolved(title) => {
+                    let label = context_label(title);
+                    if let Some(label) = &label {
+                        self.retained_components.insert(
+                            generation.clone(),
+                            RetainedComponent {
+                                identity_digest: pane_identity.clone(),
+                                label: label.clone(),
+                            },
+                        );
+                    } else {
+                        self.retained_components.remove(&generation);
+                    }
+                    label
+                }
+                DisplayState::Failed => self
+                    .retained_components
+                    .get(&generation)
+                    .filter(|retained| retained.identity_digest == pane_identity)
+                    .map(|retained| retained.label.clone()),
+                DisplayState::Unresolved => {
+                    self.retained_components.remove(&generation);
+                    None
+                }
+            };
+            if let Some(label) = label {
+                contributors.push(Contributor {
+                    pane_id: &pane.pane_id,
+                    terminal_id: &pane.terminal_id,
+                    agent,
+                    binding_identity,
+                    identity,
+                    label,
+                });
+            }
+        }
+        contributors.first()?;
+        let identities: Vec<_> = contributors
+            .iter()
+            .map(|contributor| (contributor.agent, contributor.identity))
+            .collect();
+        let generations: Vec<_> = contributors
+            .iter()
+            .map(|contributor| {
+                (
+                    contributor.pane_id,
+                    contributor.terminal_id,
+                    contributor.agent,
+                    contributor.binding_identity,
+                )
+            })
+            .collect();
+        Some(Composition {
+            selection: Selection {
+                generation_digest: digest_contributor_generations(&generations),
+                identity_digest: digest_composition(&tab.tab_id, &identities),
+            },
+            label: contributors
+                .into_iter()
+                .map(|contributor| contributor.label)
+                .collect::<Vec<_>>()
+                .join(" + "),
+        })
+    }
+
     fn persist_document(&self) -> Result<(), TabNameError> {
         if self.document.tabs.is_empty() && !self.document.cleanup_pending {
             self.state_file.remove().map_err(|_| TabNameError::State)
@@ -566,7 +726,7 @@ enum Observation {
 fn recover_observation(
     tab_state: &mut TabState,
     tab: &TabSnapshot,
-    panes: &[PaneSnapshot],
+    selection: Option<&Selection>,
 ) -> Observation {
     let observed_digest = digest_label(&tab.observed_label);
     if tab_state.stale_target_digest.as_deref() == Some(observed_digest.as_str()) {
@@ -589,54 +749,75 @@ fn recover_observation(
         if observed_digest == pending.prior_digest {
             return Observation::PendingPrior;
         }
-        record_manual(tab_state, tab, panes);
+        record_manual(tab_state, selection, &tab.observed_label);
         return Observation::Retained;
     }
     if observed_is_manual(tab_state, &tab.observed_label) {
-        record_manual(tab_state, tab, panes);
+        record_manual(tab_state, selection, &tab.observed_label);
     }
     Observation::Retained
 }
 
-fn pending_generated_focus_changed(
-    pending: &PendingTransition,
-    tab: &TabSnapshot,
-    panes: &[PaneSnapshot],
-) -> bool {
-    let PendingDisposition::Keep {
-        source: AppliedSource::Generated { identity_digest },
-    } = &pending.disposition
-    else {
-        return false;
-    };
-    panes
-        .iter()
-        .find(|pane| pane.pane_id == tab.focused_pane_id && pane.tab_id == tab.tab_id)
-        .and_then(|pane| context_digest(pane, &tab.tab_id))
-        .is_some_and(|focused_identity| focused_identity != *identity_digest)
+fn recover_incomplete_selection(
+    tab_state: &TabState,
+    evidence: &IncompleteCompositionEvidence,
+) -> Option<Selection> {
+    let persisted = tab_state.selection.as_ref()?;
+    let generation_matches = persisted.generation_digest == evidence.generation_digest;
+    if !generation_matches
+        || evidence
+            .identity_digest
+            .as_ref()
+            .is_some_and(|digest| digest != &persisted.identity_digest)
+        || !tab_state_owns_identity(tab_state, &persisted.identity_digest)
+    {
+        return None;
+    }
+    Some(Selection {
+        generation_digest: evidence.generation_digest.clone(),
+        identity_digest: persisted.identity_digest.clone(),
+    })
 }
 
-fn pending_generated_identity_is_live(
-    pending: &PendingTransition,
+fn tab_state_owns_identity(tab_state: &TabState, identity_digest: &str) -> bool {
+    tab_state
+        .applied
+        .as_ref()
+        .and_then(|applied| source_identity_digest(&applied.source))
+        == Some(identity_digest)
+        || tab_state.pending.as_ref().is_some_and(|pending| {
+            matches!(
+                &pending.disposition,
+                PendingDisposition::Keep { source }
+                    if source_identity_digest(source) == Some(identity_digest)
+            )
+        })
+}
+
+fn source_identity_digest(source: &AppliedSource) -> Option<&str> {
+    match source {
+        AppliedSource::Generated { identity_digest }
+        | AppliedSource::Override { identity_digest } => Some(identity_digest),
+        AppliedSource::Baseline => None,
+    }
+}
+
+fn observed_owned_selection_matches(
+    tab_state: &TabState,
     tab: &TabSnapshot,
-    panes: &[PaneSnapshot],
+    selection: &Selection,
 ) -> bool {
-    let PendingDisposition::Keep {
-        source: AppliedSource::Generated { identity_digest },
-    } = &pending.disposition
-    else {
-        return false;
-    };
-    panes.iter().any(|pane| {
-        pane.tab_id == tab.tab_id
-            && context_digest(pane, &tab.tab_id).as_deref() == Some(identity_digest.as_str())
+    tab_state.applied.as_ref().is_some_and(|applied| {
+        source_identity_digest(&applied.source) == Some(selection.identity_digest.as_str())
+            && applied.target_digest == digest_label(&tab.observed_label)
     })
 }
 
 fn pending_target_label(
     tab_state: &TabState,
     tab: &TabSnapshot,
-    panes: &[PaneSnapshot],
+    composition: Option<&Composition>,
+    selection: Option<&Selection>,
     pending: &PendingTransition,
 ) -> Option<String> {
     match &pending.disposition {
@@ -646,21 +827,14 @@ fn pending_target_label(
         } => Some(baseline_label(&tab_state.baseline, tab.position)),
         PendingDisposition::Keep {
             source: AppliedSource::Override { identity_digest },
-        } => tab_state.overrides.get(identity_digest).cloned(),
+        } => selection
+            .filter(|selection| selection.identity_digest == *identity_digest)
+            .and_then(|_| tab_state.overrides.get(identity_digest).cloned()),
         PendingDisposition::Keep {
             source: AppliedSource::Generated { identity_digest },
-        } => panes.iter().find_map(|pane| {
-            (pane.tab_id == tab.tab_id
-                && context_digest(pane, &tab.tab_id).as_deref() == Some(identity_digest.as_str()))
-            .then(|| match &pane.context {
-                PaneContext::Supported {
-                    display: DisplayState::Resolved(title),
-                    ..
-                } => tab_label(title),
-                PaneContext::Supported { .. } | PaneContext::Unsupported => None,
-            })
-            .flatten()
-        }),
+        } => composition
+            .filter(|composition| composition.selection.identity_digest == *identity_digest)
+            .map(|composition| composition.label.clone()),
     }
 }
 
@@ -671,37 +845,18 @@ fn observed_is_manual(tab_state: &TabState, label: &str) -> bool {
         .is_some_and(|applied| applied.target_digest != digest_label(label))
 }
 
-fn record_manual(tab_state: &mut TabState, tab: &TabSnapshot, panes: &[PaneSnapshot]) {
-    record_manual_label(tab_state, tab, panes, &tab.observed_label);
+fn record_manual(tab_state: &mut TabState, selection: Option<&Selection>, label: &str) {
+    record_manual_label(tab_state, selection, label);
 }
 
-fn record_manual_label(
-    tab_state: &mut TabState,
-    tab: &TabSnapshot,
-    panes: &[PaneSnapshot],
-    label: &str,
-) {
-    let focused_selection = panes
-        .iter()
-        .find(|pane| pane.pane_id == tab.focused_pane_id)
-        .and_then(|pane| {
-            context_digest(pane, &tab.tab_id).map(|identity_digest| Selection {
-                pane_id: pane.pane_id.clone(),
-                identity_digest,
-            })
-        });
-    let attributed_selection = focused_selection.or_else(|| {
-        tab_state
-            .selection
-            .clone()
-            .filter(|_| selection_is_live(tab_state, &tab.tab_id, panes))
-    });
+fn record_manual_label(tab_state: &mut TabState, selection: Option<&Selection>, label: &str) {
     tab_state.baseline = Baseline::Exact {
         value: label.to_owned(),
     };
     tab_state.pending = None;
     tab_state.release_confirmed = false;
-    if let Some(selection) = attributed_selection {
+    if let Some(selection) = selection {
+        let selection = selection.clone();
         tab_state.selection = Some(selection.clone());
         tab_state
             .overrides
@@ -721,60 +876,18 @@ fn record_manual_label(
     }
 }
 
-fn adopt_focused_selection(
-    tab_state: &mut TabState,
-    tab: &TabSnapshot,
-    panes_by_id: &HashMap<&str, &PaneSnapshot>,
-) -> bool {
-    let Some(pane) = panes_by_id.get(tab.focused_pane_id.as_str()) else {
-        return false;
+fn contributor_generation_digest(pane: &PaneSnapshot) -> Option<String> {
+    let binding_identity = pane.binding_identity.as_deref()?;
+    let agent = match &pane.context {
+        PaneContext::Unsupported => return None,
+        PaneContext::Failed { agent } | PaneContext::Supported { agent, .. } => agent,
     };
-    let Some(identity_digest) = context_digest(pane, &tab.tab_id) else {
-        return false;
-    };
-    let changed = tab_state
-        .selection
-        .as_ref()
-        .is_none_or(|selection| selection.identity_digest != identity_digest);
-    tab_state.selection = Some(Selection {
-        pane_id: pane.pane_id.clone(),
-        identity_digest,
-    });
-    changed
-}
-
-fn selection_is_live(tab_state: &TabState, tab_id: &str, panes: &[PaneSnapshot]) -> bool {
-    let Some(selection) = &tab_state.selection else {
-        return false;
-    };
-    panes.iter().any(|pane| {
-        pane.pane_id == selection.pane_id
-            && pane.tab_id == tab_id
-            && context_digest(pane, tab_id).as_deref() == Some(selection.identity_digest.as_str())
-    })
-}
-
-fn context_digest(pane: &PaneSnapshot, tab_id: &str) -> Option<String> {
-    if pane.tab_id != tab_id {
-        return None;
-    }
-    match &pane.context {
-        PaneContext::Supported {
-            agent, identity, ..
-        } => Some(digest_identity(tab_id, agent, identity)),
-        PaneContext::Unsupported => None,
-    }
-}
-
-fn resolved_context<'a>(pane: &'a PaneSnapshot, tab_id: &str) -> Option<(String, &'a str)> {
-    match &pane.context {
-        PaneContext::Supported {
-            agent,
-            identity,
-            display: DisplayState::Resolved(title),
-        } if pane.tab_id == tab_id => Some((digest_identity(tab_id, agent, identity), title)),
-        PaneContext::Supported { .. } | PaneContext::Unsupported => None,
-    }
+    Some(digest_contributor_generations(&[(
+        &pane.pane_id,
+        &pane.terminal_id,
+        agent,
+        binding_identity,
+    )]))
 }
 
 fn capture_baseline(tab: &TabSnapshot) -> Baseline {
@@ -858,19 +971,24 @@ fn plan_target(
 mod tests {
     use super::*;
 
-    fn tab(tab_id: &str, position: usize, label: &str, focused_pane_id: &str) -> TabSnapshot {
+    fn tab(tab_id: &str, position: usize, label: &str, _ignored_pane_id: &str) -> TabSnapshot {
         TabSnapshot {
             tab_id: tab_id.into(),
             workspace_id: tab_id.split(':').next().unwrap().into(),
             position,
             observed_label: label.into(),
-            focused_pane_id: focused_pane_id.into(),
         }
+    }
+
+    fn binding_identity(identity: &str) -> Option<Vec<u8>> {
+        Some(format!("binding-{identity}").into_bytes())
     }
 
     fn resolved(pane_id: &str, tab_id: &str, identity: &str, title: &str) -> PaneSnapshot {
         PaneSnapshot {
             pane_id: pane_id.into(),
+            terminal_id: format!("terminal-{pane_id}"),
+            binding_identity: binding_identity(identity),
             tab_id: tab_id.into(),
             context: PaneContext::Supported {
                 agent: "pi".into(),
@@ -880,10 +998,145 @@ mod tests {
         }
     }
 
+    fn failed(pane_id: &str, tab_id: &str, identity: &str) -> PaneSnapshot {
+        failed_with_terminal(pane_id, &format!("terminal-{pane_id}"), tab_id, identity)
+    }
+
+    fn failed_with_terminal(
+        pane_id: &str,
+        terminal_id: &str,
+        tab_id: &str,
+        identity: &str,
+    ) -> PaneSnapshot {
+        PaneSnapshot {
+            pane_id: pane_id.into(),
+            terminal_id: terminal_id.into(),
+            binding_identity: binding_identity(identity),
+            tab_id: tab_id.into(),
+            context: PaneContext::Supported {
+                agent: "pi".into(),
+                identity: identity.into(),
+                display: DisplayState::Failed,
+            },
+        }
+    }
+
+    fn failed_without_identity(pane_id: &str, tab_id: &str, binding: &str) -> PaneSnapshot {
+        PaneSnapshot {
+            pane_id: pane_id.into(),
+            terminal_id: format!("terminal-{pane_id}"),
+            binding_identity: binding_identity(binding),
+            tab_id: tab_id.into(),
+            context: PaneContext::Failed { agent: "pi".into() },
+        }
+    }
+
+    fn unresolved(pane_id: &str, tab_id: &str, identity: &str) -> PaneSnapshot {
+        PaneSnapshot {
+            pane_id: pane_id.into(),
+            terminal_id: format!("terminal-{pane_id}"),
+            binding_identity: binding_identity(identity),
+            tab_id: tab_id.into(),
+            context: PaneContext::Supported {
+                agent: "pi".into(),
+                identity: identity.into(),
+                display: DisplayState::Unresolved,
+            },
+        }
+    }
+
+    fn unsupported(pane_id: &str, tab_id: &str) -> PaneSnapshot {
+        PaneSnapshot {
+            pane_id: pane_id.into(),
+            terminal_id: String::new(),
+            binding_identity: None,
+            tab_id: tab_id.into(),
+            context: PaneContext::Unsupported,
+        }
+    }
+
+    fn failed_aggregate() -> [PaneSnapshot; 2] {
+        [
+            failed("w1:p1", "w1:t1", "session-a"),
+            failed("w1:p2", "w1:t1", "session-b"),
+        ]
+    }
+
     fn complete(manager: &mut TabNameManager, effect: &RenameEffect) {
         manager
             .complete_rename(effect.token(), RenameCompletion::Applied)
             .unwrap();
+    }
+
+    fn composition_a() -> [PaneSnapshot; 2] {
+        [
+            resolved("w1:p1", "w1:t1", "session-a", "Alpha"),
+            resolved("w1:p2", "w1:t1", "session-b", "Beta"),
+        ]
+    }
+
+    fn incomplete_composition_a() -> [PaneSnapshot; 2] {
+        [
+            failed_without_identity("w1:p1", "w1:t1", "session-a"),
+            resolved("w1:p2", "w1:t1", "session-b", "Beta"),
+        ]
+    }
+
+    fn composition_b() -> [PaneSnapshot; 1] {
+        [resolved("w1:p3", "w1:t1", "session-c", "Gamma")]
+    }
+
+    fn manager_with_composition_overrides(
+        state_dir: &Path,
+        socket: &Path,
+        now: Instant,
+    ) -> TabNameManager {
+        let mut manager = TabNameManager::load(state_dir, socket).unwrap();
+        let composition_a = composition_a();
+        let acquired = manager
+            .reconcile(
+                true,
+                &[tab("w1:t1", 1, "baseline-a", "w1:p1")],
+                &composition_a,
+                now,
+            )
+            .unwrap();
+        complete(&mut manager, &acquired[0]);
+        assert!(
+            manager
+                .reconcile(
+                    true,
+                    &[tab("w1:t1", 1, "manual-a", "w1:p1")],
+                    &composition_a,
+                    now,
+                )
+                .unwrap()
+                .is_empty()
+        );
+
+        let composition_b = composition_b();
+        let switched = manager
+            .reconcile(
+                true,
+                &[tab("w1:t1", 1, "manual-a", "w1:p3")],
+                &composition_b,
+                now,
+            )
+            .unwrap();
+        assert_eq!(switched[0].label(), "Gamma");
+        complete(&mut manager, &switched[0]);
+        assert!(
+            manager
+                .reconcile(
+                    true,
+                    &[tab("w1:t1", 1, "manual-b", "w1:p3")],
+                    &composition_b,
+                    now,
+                )
+                .unwrap()
+                .is_empty()
+        );
+        manager
     }
 
     #[test]
@@ -1051,70 +1304,6 @@ mod tests {
     }
 
     #[test]
-    fn manual_label_during_focus_debounce_belongs_to_current_focused_session() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut manager =
-            TabNameManager::load(temp.path(), Path::new("/tmp/herdr-focus-manual.sock")).unwrap();
-        let now = Instant::now();
-        let panes = [
-            resolved("w1:p1", "w1:t1", "session-a", "Alpha"),
-            resolved("w1:p2", "w1:t1", "session-b", "Beta"),
-        ];
-        let initial = manager
-            .reconcile(true, &[tab("w1:t1", 1, "baseline", "w1:p1")], &panes, now)
-            .unwrap();
-        complete(&mut manager, &initial[0]);
-
-        manager.note_focus("w1:t1", now);
-        let manual = "manual for focused B";
-        assert!(
-            manager
-                .reconcile(
-                    true,
-                    &[tab("w1:t1", 1, manual, "w1:p2")],
-                    &panes,
-                    now + Duration::from_millis(10),
-                )
-                .unwrap()
-                .is_empty()
-        );
-        assert!(
-            manager
-                .reconcile(
-                    true,
-                    &[tab("w1:t1", 1, manual, "w1:p2")],
-                    &panes,
-                    now + FOCUS_DEBOUNCE,
-                )
-                .unwrap()
-                .is_empty()
-        );
-
-        manager.note_focus("w1:t1", now + Duration::from_millis(200));
-        let alpha = manager
-            .reconcile(
-                true,
-                &[tab("w1:t1", 1, manual, "w1:p1")],
-                &panes,
-                now + Duration::from_millis(350),
-            )
-            .unwrap();
-        assert_eq!(alpha[0].label(), "Alpha");
-        complete(&mut manager, &alpha[0]);
-
-        manager.note_focus("w1:t1", now + Duration::from_millis(400));
-        let restored = manager
-            .reconcile(
-                true,
-                &[tab("w1:t1", 1, "Alpha", "w1:p2")],
-                &panes,
-                now + Duration::from_millis(550),
-            )
-            .unwrap();
-        assert_eq!(restored[0].label(), manual);
-    }
-
-    #[test]
     fn missing_or_closed_tab_discards_owned_state() {
         let temp = tempfile::tempdir().unwrap();
         let mut manager =
@@ -1220,16 +1409,14 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        manager.note_focus("w1:t1", now);
-        let beta = manager
-            .reconcile(
-                true,
-                &[tab("w1:t1", 1, manual, "w1:p2")],
-                &panes,
-                now + FOCUS_DEBOUNCE,
-            )
+        let reordered = [
+            resolved("w1:p2", "w1:t1", "session-b", "Beta"),
+            resolved("w1:p1", "w1:t1", "session-a", "Alpha"),
+        ];
+        let generated = manager
+            .reconcile(true, &[tab("w1:t1", 1, manual, "w1:p2")], &reordered, now)
             .unwrap();
-        assert_eq!(beta[0].label(), "Beta");
+        assert_eq!(generated[0].label(), "Beta + Alpha");
     }
 
     #[test]
@@ -1327,7 +1514,8 @@ mod tests {
         assert_eq!(effects.len(), 1);
         assert_eq!(effects[0].tab_id(), "w2:t1");
         assert_eq!(effects[0].label(), "Alpha");
-        assert!(!manager.document.tabs.contains_key("w1:t1"));
+        assert!(manager.document.tabs.contains_key("w1:t1"));
+        assert!(manager.document.tabs["w1:t1"].selection.is_none());
     }
 
     #[test]
@@ -1358,7 +1546,7 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        assert!(restarted.document.tabs.is_empty());
+        assert!(restarted.document.tabs["w1:t1"].selection.is_none());
     }
 
     #[test]
@@ -1389,7 +1577,7 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        assert!(manager.document.tabs.is_empty());
+        assert!(manager.document.tabs["w1:t1"].selection.is_none());
 
         let initial = manager
             .reconcile(
@@ -1415,56 +1603,322 @@ mod tests {
             .reconcile(true, &[tab("w1:t1", 4, "1", "w1:p-shell")], &[], now)
             .unwrap();
         assert!(exact.is_empty());
-        assert!(manager.document.tabs.is_empty());
+        assert!(manager.document.tabs["w1:t1"].selection.is_none());
     }
 
     #[test]
-    fn generated_pending_does_not_block_focused_identity_when_old_identity_is_failed() {
+    fn known_failed_identity_retains_its_prior_component() {
         let temp = tempfile::tempdir().unwrap();
-        let socket = Path::new("/tmp/herdr-generated-focused.sock");
+        let mut manager =
+            TabNameManager::load(temp.path(), Path::new("/tmp/herdr-failed-component.sock"))
+                .unwrap();
         let now = Instant::now();
-        let mut manager = TabNameManager::load(temp.path(), socket).unwrap();
-        let old_a = [resolved("w1:p1", "w1:t1", "session-a", "Alpha old")];
-        let initial = manager
-            .reconcile(true, &[tab("w1:t1", 1, "baseline", "w1:p1")], &old_a, now)
-            .unwrap();
-        complete(&mut manager, &initial[0]);
-        let new_a = [resolved("w1:p1", "w1:t1", "session-a", "Alpha new")];
-        manager
-            .reconcile(true, &[tab("w1:t1", 1, "Alpha old", "w1:p1")], &new_a, now)
-            .unwrap();
-        drop(manager);
-
-        let panes = [
-            PaneSnapshot {
-                pane_id: "w1:p1".into(),
-                tab_id: "w1:t1".into(),
-                context: PaneContext::Supported {
-                    agent: "pi".into(),
-                    identity: "session-a".into(),
-                    display: DisplayState::Failed,
-                },
-            },
+        let initial_panes = [
+            resolved("w1:p1", "w1:t1", "session-a", "Alpha"),
             resolved("w1:p2", "w1:t1", "session-b", "Beta"),
         ];
-        let mut restarted = TabNameManager::load(temp.path(), socket).unwrap();
-        assert!(
-            restarted
-                .reconcile(true, &[tab("w1:t1", 1, "Alpha old", "w1:p2")], &panes, now)
-                .unwrap()
-                .is_empty()
-        );
-        let effects = restarted
+        let initial = manager
             .reconcile(
                 true,
-                &[tab("w1:t1", 1, "Alpha old", "w1:p2")],
-                &panes,
-                now + FOCUS_DEBOUNCE,
+                &[tab("w1:t1", 1, "baseline", "w1:p1")],
+                &initial_panes,
+                now,
+            )
+            .unwrap();
+        complete(&mut manager, &initial[0]);
+
+        let failed = [
+            failed("w1:p1", "w1:t1", "session-a"),
+            resolved("w1:p2", "w1:t1", "session-b", "Beta updated"),
+        ];
+        let effects = manager
+            .reconcile(
+                true,
+                &[tab("w1:t1", 1, "Alpha + Beta", "w1:p2")],
+                &failed,
+                now,
             )
             .unwrap();
 
         assert_eq!(effects.len(), 1);
-        assert_eq!(effects[0].label(), "Beta");
+        assert_eq!(effects[0].label(), "Alpha + Beta updated");
+    }
+
+    #[test]
+    fn terminal_replacement_does_not_retain_failed_component() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut manager = TabNameManager::load(
+            temp.path(),
+            Path::new("/tmp/herdr-generation-replacement.sock"),
+        )
+        .unwrap();
+        let now = Instant::now();
+        let panes = [resolved("w1:p1", "w1:t1", "session-a", "Alpha")];
+        let initial = manager
+            .reconcile(true, &[tab("w1:t1", 1, "baseline", "w1:p1")], &panes, now)
+            .unwrap();
+        complete(&mut manager, &initial[0]);
+
+        let replacement = [failed_with_terminal(
+            "w1:p1",
+            "replacement-terminal",
+            "w1:t1",
+            "session-a",
+        )];
+        let effects = manager
+            .reconcile(
+                true,
+                &[tab("w1:t1", 1, "Alpha", "w1:p1")],
+                &replacement,
+                now,
+            )
+            .unwrap();
+
+        assert_eq!(effects.len(), 1);
+        assert_eq!(effects[0].label(), "baseline");
+    }
+
+    #[test]
+    fn legacy_plaintext_pane_anchor_fails_safe_after_replacement() {
+        let temp = tempfile::tempdir().unwrap();
+        let socket = Path::new("/tmp/herdr-legacy-pane-anchor.sock");
+        let now = Instant::now();
+        let panes = [resolved("w1:p1", "w1:t1", "session-a", "Alpha")];
+        let mut manager = TabNameManager::load(temp.path(), socket).unwrap();
+        let initial = manager
+            .reconcile(true, &[tab("w1:t1", 1, "baseline", "w1:p1")], &panes, now)
+            .unwrap();
+        complete(&mut manager, &initial[0]);
+        manager
+            .document
+            .tabs
+            .get_mut("w1:t1")
+            .unwrap()
+            .selection
+            .as_mut()
+            .unwrap()
+            .generation_digest = "w1:p1".into();
+        manager.persist_document().unwrap();
+        drop(manager);
+
+        let mut failed = failed("w1:p1", "w1:t1", "session-a");
+        failed.terminal_id = "replacement-terminal".into();
+        let mut restarted = TabNameManager::load(temp.path(), socket).unwrap();
+        let effects = restarted
+            .reconcile(true, &[tab("w1:t1", 1, "Alpha", "w1:p1")], &[failed], now)
+            .unwrap();
+
+        assert_eq!(effects.len(), 1);
+        assert_eq!(effects[0].label(), "baseline");
+    }
+
+    #[test]
+    fn restart_holds_finalized_override_when_full_composition_is_incomplete() {
+        let temp = tempfile::tempdir().unwrap();
+        let socket = Path::new("/tmp/herdr-incomplete-override.sock");
+        let now = Instant::now();
+        let mut manager = manager_with_composition_overrides(temp.path(), socket, now);
+        let composition_a = composition_a();
+        let restored = manager
+            .reconcile(
+                true,
+                &[tab("w1:t1", 1, "manual-b", "w1:p1")],
+                &composition_a,
+                now,
+            )
+            .unwrap();
+        assert_eq!(restored[0].label(), "manual-a");
+        complete(&mut manager, &restored[0]);
+        drop(manager);
+
+        let mut restarted = TabNameManager::load(temp.path(), socket).unwrap();
+        let incomplete_a = incomplete_composition_a();
+        assert!(
+            restarted
+                .reconcile(
+                    true,
+                    &[tab("w1:t1", 1, "manual-a", "w1:p1")],
+                    &incomplete_a,
+                    now,
+                )
+                .unwrap()
+                .is_empty()
+        );
+
+        let composition_b = composition_b();
+        let independent = restarted
+            .reconcile(
+                true,
+                &[tab("w1:t1", 1, "manual-a", "w1:p3")],
+                &composition_b,
+                now,
+            )
+            .unwrap();
+        assert_eq!(independent[0].label(), "manual-b");
+    }
+
+    #[test]
+    fn manual_event_during_incomplete_failure_is_attributed_to_full_composition() {
+        let temp = tempfile::tempdir().unwrap();
+        let socket = Path::new("/tmp/herdr-incomplete-manual-event.sock");
+        let now = Instant::now();
+        let mut manager = manager_with_composition_overrides(temp.path(), socket, now);
+        let initial_a = composition_a();
+        let restored = manager
+            .reconcile(
+                true,
+                &[tab("w1:t1", 1, "manual-b", "w1:p1")],
+                &initial_a,
+                now,
+            )
+            .unwrap();
+        complete(&mut manager, &restored[0]);
+        drop(manager);
+
+        let mut restarted = TabNameManager::load(temp.path(), socket).unwrap();
+        let incomplete_a = incomplete_composition_a();
+        let renamed_tabs = [tab("w1:t1", 1, "manual-a-new", "w1:p1")];
+        restarted
+            .observe_renames(
+                &[TabRenameObservation {
+                    tab_id: "w1:t1".into(),
+                    label: "manual-a-new".into(),
+                }],
+                &renamed_tabs,
+                &incomplete_a,
+            )
+            .unwrap();
+        assert!(
+            restarted
+                .reconcile(true, &renamed_tabs, &incomplete_a, now)
+                .unwrap()
+                .is_empty()
+        );
+
+        let recovered_a = composition_a();
+        assert!(
+            restarted
+                .reconcile(true, &renamed_tabs, &recovered_a, now)
+                .unwrap()
+                .is_empty()
+        );
+
+        let partial_a = [resolved("w1:p2", "w1:t1", "session-b", "Beta")];
+        let partial = restarted
+            .reconcile(true, &renamed_tabs, &partial_a, now)
+            .unwrap();
+        assert_eq!(partial[0].label(), "Beta");
+        complete(&mut restarted, &partial[0]);
+
+        let composition_b = composition_b();
+        let independent = restarted
+            .reconcile(
+                true,
+                &[tab("w1:t1", 1, "Beta", "w1:p3")],
+                &composition_b,
+                now,
+            )
+            .unwrap();
+        assert_eq!(independent[0].label(), "manual-b");
+    }
+
+    #[test]
+    fn restart_finalizes_rpc_applied_pending_override_for_incomplete_composition() {
+        let temp = tempfile::tempdir().unwrap();
+        let socket = Path::new("/tmp/herdr-incomplete-pending-override.sock");
+        let now = Instant::now();
+        let mut manager = manager_with_composition_overrides(temp.path(), socket, now);
+        let composition_a = composition_a();
+        let pending = manager
+            .reconcile(
+                true,
+                &[tab("w1:t1", 1, "manual-b", "w1:p1")],
+                &composition_a,
+                now,
+            )
+            .unwrap();
+        assert_eq!(pending[0].label(), "manual-a");
+        drop(manager);
+
+        let mut restarted = TabNameManager::load(temp.path(), socket).unwrap();
+        let incomplete_a = incomplete_composition_a();
+        assert!(
+            restarted
+                .reconcile(
+                    true,
+                    &[tab("w1:t1", 1, "manual-a", "w1:p1")],
+                    &incomplete_a,
+                    now,
+                )
+                .unwrap()
+                .is_empty()
+        );
+        assert!(restarted.document.tabs["w1:t1"].pending.is_none());
+    }
+
+    #[test]
+    fn restart_holds_applied_generated_label_when_known_composition_first_read_fails() {
+        let temp = tempfile::tempdir().unwrap();
+        let socket = Path::new("/tmp/herdr-applied-failed-restart.sock");
+        let now = Instant::now();
+        let panes = [
+            resolved("w1:p1", "w1:t1", "session-a", "Alpha"),
+            resolved("w1:p2", "w1:t1", "session-b", "Beta"),
+        ];
+        let mut manager = TabNameManager::load(temp.path(), socket).unwrap();
+        let initial = manager
+            .reconcile(true, &[tab("w1:t1", 1, "baseline", "w1:p1")], &panes, now)
+            .unwrap();
+        complete(&mut manager, &initial[0]);
+        drop(manager);
+
+        let failed = failed_aggregate();
+        let mut restarted = TabNameManager::load(temp.path(), socket).unwrap();
+
+        assert!(
+            restarted
+                .reconcile(
+                    true,
+                    &[tab("w1:t1", 1, "Alpha + Beta", "w1:p1")],
+                    &failed,
+                    now,
+                )
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn restart_holds_rpc_applied_pending_label_when_known_composition_first_read_fails() {
+        let temp = tempfile::tempdir().unwrap();
+        let socket = Path::new("/tmp/herdr-pending-failed-restart.sock");
+        let now = Instant::now();
+        let panes = [
+            resolved("w1:p1", "w1:t1", "session-a", "Alpha"),
+            resolved("w1:p2", "w1:t1", "session-b", "Beta"),
+        ];
+        let mut manager = TabNameManager::load(temp.path(), socket).unwrap();
+        let initial = manager
+            .reconcile(true, &[tab("w1:t1", 1, "baseline", "w1:p1")], &panes, now)
+            .unwrap();
+        assert_eq!(initial[0].label(), "Alpha + Beta");
+        drop(manager);
+
+        let failed = failed_aggregate();
+        let mut restarted = TabNameManager::load(temp.path(), socket).unwrap();
+
+        assert!(
+            restarted
+                .reconcile(
+                    true,
+                    &[tab("w1:t1", 1, "Alpha + Beta", "w1:p1")],
+                    &failed,
+                    now,
+                )
+                .unwrap()
+                .is_empty()
+        );
+        assert!(restarted.document.tabs["w1:t1"].pending.is_none());
     }
 
     #[test]
@@ -1487,20 +1941,8 @@ mod tests {
 
         let b = [resolved("w1:p2", "w1:t1", "session-b", "Beta")];
         let mut restarted = TabNameManager::load(temp.path(), socket).unwrap();
-        let baseline = restarted
-            .reconcile(true, &[tab("w1:t1", 1, "Alpha old", "w1:p2")], &b, now)
-            .unwrap();
-        assert_eq!(baseline.len(), 1);
-        assert_eq!(baseline[0].label(), "baseline");
-        complete(&mut restarted, &baseline[0]);
-        restarted.reset_event_expectations();
         let effects = restarted
-            .reconcile(
-                true,
-                &[tab("w1:t1", 1, "baseline", "w1:p2")],
-                &b,
-                now + FOCUS_DEBOUNCE,
-            )
+            .reconcile(true, &[tab("w1:t1", 1, "Alpha old", "w1:p2")], &b, now)
             .unwrap();
         assert_eq!(effects.len(), 1);
         assert_eq!(effects[0].label(), "Beta");
@@ -1517,35 +1959,16 @@ mod tests {
             .reconcile(true, &[tab("w1:t1", 1, "baseline", "w1:p1")], &a, now)
             .unwrap();
         complete(&mut manager, &initial[0]);
-        let b = [PaneSnapshot {
-            pane_id: "w1:p2".into(),
-            tab_id: "w1:t1".into(),
-            context: PaneContext::Supported {
-                agent: "pi".into(),
-                identity: "session-b".into(),
-                display: DisplayState::Failed,
-            },
-        }];
-        manager.note_focus("w1:t1", now);
+        let b = [failed("w1:p2", "w1:t1", "session-b")];
         let pending = manager
-            .reconcile(
-                true,
-                &[tab("w1:t1", 1, "Alpha", "w1:p2")],
-                &b,
-                now + FOCUS_DEBOUNCE,
-            )
+            .reconcile(true, &[tab("w1:t1", 1, "Alpha", "w1:p2")], &b, now)
             .unwrap();
         assert_eq!(pending[0].label(), "baseline");
         drop(manager);
 
         let mut restarted = TabNameManager::load(temp.path(), socket).unwrap();
         let retried = restarted
-            .reconcile(
-                true,
-                &[tab("w1:t1", 1, "Alpha", "w1:p2")],
-                &b,
-                now + FOCUS_DEBOUNCE,
-            )
+            .reconcile(true, &[tab("w1:t1", 1, "Alpha", "w1:p2")], &b, now)
             .unwrap();
         assert_eq!(retried.len(), 1);
         assert_eq!(retried[0].label(), "baseline");
@@ -1567,60 +1990,42 @@ mod tests {
             .unwrap();
         complete(&mut manager, &initial[0]);
 
-        let failed = [PaneSnapshot {
-            pane_id: "w1:p1".into(),
-            tab_id: "w1:t1".into(),
-            context: PaneContext::Supported {
-                agent: "pi".into(),
-                identity: "session-a".into(),
-                display: DisplayState::Failed,
-            },
-        }];
+        let failed_panes = [failed("w1:p1", "w1:t1", "session-a")];
         assert!(
             manager
-                .reconcile(true, &[tab("w1:t1", 1, "Alpha", "w1:p1")], &failed, now,)
+                .reconcile(
+                    true,
+                    &[tab("w1:t1", 1, "Alpha", "w1:p1")],
+                    &failed_panes,
+                    now,
+                )
                 .unwrap()
                 .is_empty()
         );
 
         let unresolved = [
-            failed.into_iter().next().unwrap(),
-            PaneSnapshot {
-                pane_id: "w1:p2".into(),
-                tab_id: "w1:t1".into(),
-                context: PaneContext::Supported {
-                    agent: "pi".into(),
-                    identity: "session-b".into(),
-                    display: DisplayState::Unresolved,
-                },
-            },
+            failed_panes.into_iter().next().unwrap(),
+            unresolved("w1:p2", "w1:t1", "session-b"),
         ];
-        manager.note_focus("w1:t1", now);
-        let baseline = manager
-            .reconcile(
-                true,
-                &[tab("w1:t1", 1, "Alpha", "w1:p2")],
-                &unresolved,
-                now + FOCUS_DEBOUNCE,
-            )
-            .unwrap();
-        assert_eq!(baseline[0].label(), "baseline");
-        complete(&mut manager, &baseline[0]);
+        assert!(
+            manager
+                .reconcile(true, &[tab("w1:t1", 1, "Alpha", "w1:p2")], &unresolved, now,)
+                .unwrap()
+                .is_empty()
+        );
 
-        let resolved_b = [resolved("w1:p2", "w1:t1", "session-b", "Beta")];
-        let beta = manager
-            .reconcile(
-                true,
-                &[tab("w1:t1", 1, "baseline", "w1:p2")],
-                &resolved_b,
-                now + FOCUS_DEBOUNCE,
-            )
+        let resolved_b = [
+            failed("w1:p1", "w1:t1", "session-a"),
+            resolved("w1:p2", "w1:t1", "session-b", "Beta"),
+        ];
+        let aggregate = manager
+            .reconcile(true, &[tab("w1:t1", 1, "Alpha", "w1:p2")], &resolved_b, now)
             .unwrap();
-        assert_eq!(beta[0].label(), "Beta");
+        assert_eq!(aggregate[0].label(), "Alpha + Beta");
     }
 
     #[test]
-    fn non_agent_focus_retains_only_the_last_selected_live_session() {
+    fn unsupported_panes_are_omitted_from_the_aggregate() {
         let temp = tempfile::tempdir().unwrap();
         let mut manager =
             TabNameManager::load(temp.path(), Path::new("/tmp/herdr-shell.sock")).unwrap();
@@ -1639,11 +2044,7 @@ mod tests {
             .unwrap();
         complete(&mut manager, &initial[0]);
 
-        let shell = PaneSnapshot {
-            pane_id: "w1:p3".into(),
-            tab_id: "w1:t1".into(),
-            context: PaneContext::Unsupported,
-        };
+        let shell = unsupported("w1:p3", "w1:t1");
         let updated_panes = [
             resolved("w1:p1", "w1:t1", "session-a", "Alpha"),
             resolved("w1:p2", "w1:t1", "session-b", "Beta updated"),
@@ -1652,44 +2053,37 @@ mod tests {
         let updated = manager
             .reconcile(
                 true,
-                &[tab("w1:t1", 1, "Beta", "w1:p3")],
+                &[tab("w1:t1", 1, "Alpha + Beta", "w1:p3")],
                 &updated_panes,
                 now,
             )
             .unwrap();
-        assert_eq!(updated[0].label(), "Beta updated");
+        assert_eq!(updated[0].label(), "Alpha + Beta updated");
         complete(&mut manager, &updated[0]);
 
         let remaining = [
             resolved("w1:p1", "w1:t1", "session-a", "Alpha"),
-            PaneSnapshot {
-                pane_id: "w1:p3".into(),
-                tab_id: "w1:t1".into(),
-                context: PaneContext::Unsupported,
-            },
+            unsupported("w1:p3", "w1:t1"),
         ];
         let restored = manager
             .reconcile(
                 true,
-                &[tab("w1:t1", 1, "Beta updated", "w1:p3")],
+                &[tab("w1:t1", 1, "Alpha + Beta updated", "w1:p3")],
                 &remaining,
                 now,
             )
             .unwrap();
         assert_eq!(restored.len(), 1);
-        assert_eq!(restored[0].label(), "baseline");
+        assert_eq!(restored[0].label(), "Alpha");
     }
 
     #[test]
-    fn snapshot_detected_focus_change_starts_its_own_debounce() {
+    fn manual_rename_without_a_composition_updates_only_the_baseline() {
         let temp = tempfile::tempdir().unwrap();
         let mut manager =
-            TabNameManager::load(temp.path(), Path::new("/tmp/herdr-snapshot-focus.sock")).unwrap();
+            TabNameManager::load(temp.path(), Path::new("/tmp/herdr-empty-manual.sock")).unwrap();
         let now = Instant::now();
-        let panes = [
-            resolved("w1:p1", "w1:t1", "session-a", "Alpha"),
-            resolved("w1:p2", "w1:t1", "session-b", "Beta"),
-        ];
+        let panes = [resolved("w1:p1", "w1:t1", "session-a", "Alpha")];
         let initial = manager
             .reconcile(true, &[tab("w1:t1", 1, "baseline", "w1:p1")], &panes, now)
             .unwrap();
@@ -1697,80 +2091,83 @@ mod tests {
 
         assert!(
             manager
-                .reconcile(true, &[tab("w1:t1", 1, "Alpha", "w1:p2")], &panes, now,)
+                .reconcile(true, &[tab("w1:t1", 1, "manual-a", "w1:p1")], &panes, now,)
                 .unwrap()
                 .is_empty()
         );
-        assert_eq!(manager.next_deadline(), Some(now + FOCUS_DEBOUNCE));
-        let beta = manager
+        assert!(
+            manager
+                .reconcile(true, &[tab("w1:t1", 1, "manual-a", "w1:p-shell")], &[], now,)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            manager
+                .reconcile(
+                    true,
+                    &[tab("w1:t1", 1, "empty manual", "w1:p-shell")],
+                    &[],
+                    now,
+                )
+                .unwrap()
+                .is_empty()
+        );
+
+        let restored = manager
             .reconcile(
                 true,
-                &[tab("w1:t1", 1, "Alpha", "w1:p2")],
+                &[tab("w1:t1", 1, "empty manual", "w1:p1")],
                 &panes,
-                now + FOCUS_DEBOUNCE,
+                now,
             )
             .unwrap();
-        assert_eq!(beta[0].label(), "Beta");
+        assert_eq!(restored[0].label(), "manual-a");
     }
 
     #[test]
-    fn manual_override_is_identity_scoped_and_focus_debounced() {
+    fn manual_override_is_scoped_to_the_ordered_composition() {
         let temp = tempfile::tempdir().unwrap();
         let mut manager =
             TabNameManager::load(temp.path(), Path::new("/tmp/herdr-manual.sock")).unwrap();
-        let start = Instant::now();
-        let panes = [
+        let now = Instant::now();
+        let original = [
             resolved("w1:p1", "w1:t1", "session-a", "Alpha"),
             resolved("w1:p2", "w1:t1", "session-b", "Beta"),
         ];
         let initial = manager
-            .reconcile(true, &[tab("w1:t1", 1, "baseline", "w1:p1")], &panes, start)
+            .reconcile(
+                true,
+                &[tab("w1:t1", 1, "baseline", "w1:p1")],
+                &original,
+                now,
+            )
             .unwrap();
         complete(&mut manager, &initial[0]);
 
         let manual = "a deliberately very long manual label";
         assert!(
             manager
-                .reconcile(true, &[tab("w1:t1", 1, manual, "w1:p1")], &panes, start,)
+                .reconcile(true, &[tab("w1:t1", 1, manual, "w1:p2")], &original, now,)
                 .unwrap()
                 .is_empty()
         );
 
-        manager.note_focus("w1:t1", start);
-        manager.note_focus("w1:t1", start + Duration::from_millis(100));
-        assert_eq!(
-            manager.next_deadline(),
-            Some(start + Duration::from_millis(250))
-        );
-        assert!(
-            manager
-                .reconcile(
-                    true,
-                    &[tab("w1:t1", 1, manual, "w1:p2")],
-                    &panes,
-                    start + Duration::from_millis(249),
-                )
-                .unwrap()
-                .is_empty()
-        );
-        let beta = manager
-            .reconcile(
-                true,
-                &[tab("w1:t1", 1, manual, "w1:p2")],
-                &panes,
-                start + Duration::from_millis(250),
-            )
+        let reordered = [
+            resolved("w1:p2", "w1:t1", "session-b", "Beta"),
+            resolved("w1:p1", "w1:t1", "session-a", "Alpha"),
+        ];
+        let generated = manager
+            .reconcile(true, &[tab("w1:t1", 1, manual, "w1:p1")], &reordered, now)
             .unwrap();
-        assert_eq!(beta[0].label(), "Beta");
-        complete(&mut manager, &beta[0]);
+        assert_eq!(generated[0].label(), "Beta + Alpha");
+        complete(&mut manager, &generated[0]);
 
-        manager.note_focus("w1:t1", start + Duration::from_millis(300));
         let restored = manager
             .reconcile(
                 true,
-                &[tab("w1:t1", 1, "Beta", "w1:p1")],
-                &panes,
-                start + Duration::from_millis(450),
+                &[tab("w1:t1", 1, "Beta + Alpha", "w1:p2")],
+                &original,
+                now,
             )
             .unwrap();
         assert_eq!(restored[0].label(), manual);
@@ -1802,24 +2199,21 @@ mod tests {
         drop(restarted);
 
         let mut persisted = TabNameManager::load(temp.path(), socket).unwrap();
-        persisted.note_focus("w1:t1", now);
-        let beta = persisted
-            .reconcile(
-                true,
-                &[tab("w1:t1", 1, manual, "w1:p2")],
-                &panes,
-                now + FOCUS_DEBOUNCE,
-            )
+        let reordered = [
+            resolved("w1:p2", "w1:t1", "session-b", "Beta"),
+            resolved("w1:p1", "w1:t1", "session-a", "Alpha"),
+        ];
+        let generated = persisted
+            .reconcile(true, &[tab("w1:t1", 1, manual, "w1:p2")], &reordered, now)
             .unwrap();
-        assert_eq!(beta[0].label(), "Beta");
-        complete(&mut persisted, &beta[0]);
-        persisted.note_focus("w1:t1", now + Duration::from_millis(200));
+        assert_eq!(generated[0].label(), "Beta + Alpha");
+        complete(&mut persisted, &generated[0]);
         let restored = persisted
             .reconcile(
                 true,
-                &[tab("w1:t1", 1, "Beta", "w1:p1")],
+                &[tab("w1:t1", 1, "Beta + Alpha", "w1:p1")],
                 &panes,
-                now + Duration::from_millis(350),
+                now,
             )
             .unwrap();
         assert_eq!(restored[0].label(), manual);
@@ -1859,6 +2253,55 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn duplicate_components_are_retained_without_an_aggregate_cap() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut manager =
+            TabNameManager::load(temp.path(), Path::new("/tmp/herdr-duplicates.sock")).unwrap();
+        let title = "abcdefghijklmnopqrst";
+        let panes = [
+            resolved("w1:p1", "w1:t1", "session-a", title),
+            resolved("w1:p2", "w1:t1", "session-b", title),
+        ];
+
+        let effects = manager
+            .reconcile(
+                true,
+                &[tab("w1:t1", 1, "baseline", "w1:p1")],
+                &panes,
+                Instant::now(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            effects[0].label(),
+            "abcdefghijklmnopqrst + abcdefghijklmnopqrst"
+        );
+    }
+
+    #[test]
+    fn resolved_panes_form_an_ordered_aggregate_independent_of_focus() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut manager =
+            TabNameManager::load(temp.path(), Path::new("/tmp/herdr-aggregate.sock")).unwrap();
+        let panes = [
+            resolved("w1:p1", "w1:t1", "session-a", "Alpha"),
+            resolved("w1:p2", "w1:t1", "session-b", "Beta"),
+        ];
+
+        let effects = manager
+            .reconcile(
+                true,
+                &[tab("w1:t1", 1, "baseline", "w1:p2")],
+                &panes,
+                Instant::now(),
+            )
+            .unwrap();
+
+        assert_eq!(effects.len(), 1);
+        assert_eq!(effects[0].label(), "Alpha + Beta");
     }
 
     #[test]

@@ -141,7 +141,7 @@ Ownership state follows these invariants:
 ## Progress
 
 - [x] Task 1: Define the 20-column, configuration, and Herdr pane-label contracts
-- [ ] Task 2: Convert tab ownership from focus selection to ordered composition ownership
+- [x] Task 2: Convert tab ownership from focus selection to ordered composition ownership
 - [ ] Task 3: Add durable session-scoped pane label ownership
 - [ ] Task 4: Reconcile pane and aggregate tab labels without metadata loops
 - [ ] Task 5: Publish the user contract and complete repository validation
@@ -252,6 +252,13 @@ Implementers must update this list only after each task's validation succeeds. R
 - Tab ownership has no focus deadline or focus-dependent selection path.
 - Aggregate, manual override, migration compatibility, recovery, and cleanup tests pass.
 - Existing privacy assertions still find no generated title or raw session identity in state.
+
+**Implementation record (2026-08-25):**
+
+- Changed `src/backend.rs`, `src/pi/mod.rs`, `src/claude/mod.rs`, `src/tab_name/mod.rs`, `src/tab_name/state.rs`, `src/runtime.rs`, `src/main.rs`, `tests/listener.rs`, `README.md`, and `docs/release-checklist.md`.
+- Red evidence: focused selection produced only `Beta` instead of `Alpha + Beta`; restart failures returned owned labels to baseline; terminal and binding replacement retained stale components; local-fallback Pi failures lost their component; incomplete manual overrides and pending transitions were misattributed or released.
+- Green evidence: 32 tab ownership tests, 17 tab state tests, 38 listener tests, 6 binary tests, formatting, clippy with warnings denied, and whitespace checks passed. Independent merge review found no blocking/high issue.
+- Implementation difference: the serialized `selection.pane_id` key now stores a domain-separated digest over ordered pane ID, terminal ID, agent, and binding identity. The schema and singleton identity digest remain compatible. Legacy plaintext pane anchors are not trusted during an initial failed read because they cannot distinguish terminal/binding replacement; they migrate after a complete resolution. Failure evidence and manual attribution use the persisted full composition selection without storing generated text or raw terminal/binding values.
 
 **Validation:**
 

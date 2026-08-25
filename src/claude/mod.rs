@@ -41,6 +41,10 @@ struct ParsedCache {
 }
 
 impl ClaudeBackend {
+    pub(crate) fn binding(&self, key: &PaneKey) -> Option<&Binding> {
+        self.bindings.get(key)
+    }
+
     pub fn reconcile(
         &mut self,
         config: &Config,

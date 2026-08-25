@@ -1,6 +1,6 @@
 use crate::backend::{
-    BackendOutcome, BackendRegistry, Binding, DisplayView, PaneInput, PaneKey, ProcessCommand,
-    SessionReference,
+    BackendOutcome, BackendRegistry, Binding, CLAUDE_AGENT, DisplayView, PaneInput, PaneKey,
+    ProcessCommand, SessionReference,
 };
 use crate::config::Config;
 use crate::herdr::{HerdrApi, MetadataReport};
@@ -9,6 +9,7 @@ use crate::tab_name::{
     TabNameManager, TabRenameObservation, TabSnapshot as ManagedTabSnapshot,
 };
 use std::collections::{HashMap, HashSet};
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -21,8 +22,6 @@ pub struct Runtime {
     sequences: HashMap<String, u64>,
     sequence_epoch: u64,
     tab_names: Option<TabNameManager>,
-    pane_tabs: HashMap<String, String>,
-    tab_workspaces: HashMap<String, String>,
     pending_tab_renames: Vec<TabRenameObservation>,
 }
 
@@ -56,8 +55,6 @@ impl Runtime {
                 .unwrap_or_default()
                 .as_nanos() as u64,
             tab_names: None,
-            pane_tabs: HashMap::new(),
-            tab_workspaces: HashMap::new(),
             pending_tab_renames: Vec::new(),
         }
     }
@@ -107,40 +104,6 @@ impl Runtime {
         self.tab_names
             .as_ref()
             .is_some_and(|manager| manager.needs_snapshot(self.config.tab_name.enabled))
-    }
-
-    pub fn note_focus(&mut self, pane_id: Option<&str>, workspace_id: Option<&str>, now: Instant) {
-        let Some(manager) = self.tab_names.as_mut() else {
-            return;
-        };
-        if !manager.needs_snapshot(self.config.tab_name.enabled) {
-            return;
-        }
-        if let Some(tab_id) = pane_id.and_then(|pane_id| self.pane_tabs.get(pane_id)) {
-            manager.note_focus(tab_id, now);
-            return;
-        }
-
-        let mut tab_ids: Vec<_> = self
-            .tab_workspaces
-            .iter()
-            .filter(|(_, tab_workspace_id)| {
-                workspace_id.is_none_or(|workspace_id| *tab_workspace_id == workspace_id)
-            })
-            .map(|(tab_id, _)| tab_id.clone())
-            .collect();
-        tab_ids.sort();
-        for tab_id in tab_ids {
-            manager.note_focus(&tab_id, now);
-        }
-    }
-
-    pub fn next_tab_deadline(&self) -> Option<Instant> {
-        let manager = self.tab_names.as_ref()?;
-        manager
-            .needs_snapshot(self.config.tab_name.enabled)
-            .then(|| manager.next_deadline())
-            .flatten()
     }
 
     pub fn reconcile<A: HerdrApi>(&mut self, api: &mut A) -> Result<ReconcileStatus, A::Error> {
@@ -210,7 +173,11 @@ impl Runtime {
                     binding,
                     view,
                 }) => self.report_view(api, pane, agent, binding, view.clone())?,
-                Some(BackendOutcome::Failed | BackendOutcome::FailedIdentity { .. }) => {
+                Some(
+                    BackendOutcome::Failed
+                    | BackendOutcome::FailedBinding { .. }
+                    | BackendOutcome::FailedIdentity { .. },
+                ) => {
                     let binding = self.backends.authoritative_binding(&pane.key).cloned();
                     if let Some(binding) = binding {
                         self.clear_if_binding_changed(api, pane, &binding)?;
@@ -251,7 +218,6 @@ impl Runtime {
         for layout in &snapshot.layouts {
             if layout.tab_id.is_empty()
                 || layout.workspace_id.is_empty()
-                || layout.focused_pane_id.is_empty()
                 || layouts.insert(layout.tab_id.as_str(), layout).is_some()
             {
                 self.tab_names = None;
@@ -289,7 +255,6 @@ impl Runtime {
                 workspace_id: tab.workspace_id.clone(),
                 position: *position,
                 observed_label: tab.label.clone(),
-                focused_pane_id: layout.focused_pane_id.clone(),
             });
         }
 
@@ -313,90 +278,139 @@ impl Runtime {
             }
         }
 
+        let mut layout_pane_ids = HashSet::new();
         for layout in &snapshot.layouts {
-            if snapshot_panes
-                .get(layout.focused_pane_id.as_str())
-                .is_none_or(|pane| pane.tab_id != layout.tab_id)
-            {
-                self.tab_names = None;
-                return Ok(ReconcileStatus {
-                    tab_name_disabled: true,
-                });
+            for layout_pane in &layout.panes {
+                if layout_pane.pane_id.is_empty()
+                    || !layout_pane_ids.insert(layout_pane.pane_id.as_str())
+                    || snapshot_panes
+                        .get(layout_pane.pane_id.as_str())
+                        .is_none_or(|pane| {
+                            pane.tab_id != layout.tab_id || pane.workspace_id != layout.workspace_id
+                        })
+                {
+                    self.tab_names = None;
+                    return Ok(ReconcileStatus {
+                        tab_name_disabled: true,
+                    });
+                }
             }
         }
+        if layout_pane_ids.len() != snapshot_panes.len() {
+            self.tab_names = None;
+            return Ok(ReconcileStatus {
+                tab_name_disabled: true,
+            });
+        }
 
-        self.tab_workspaces.clear();
-        self.tab_workspaces.extend(
-            snapshot
-                .tabs
-                .iter()
-                .map(|tab| (tab.tab_id.clone(), tab.workspace_id.clone())),
-        );
-        self.pane_tabs.clear();
-        self.pane_tabs.extend(
-            snapshot
-                .panes
-                .iter()
-                .map(|pane| (pane.pane_id.clone(), pane.tab_id.clone())),
-        );
         if self.config.tab_name.enabled {
             for pane in panes {
                 let (Some(workspace_id), Some(tab_id)) = (&pane.workspace_id, &pane.tab_id) else {
-                    self.defer_focus_retry(now);
                     return Ok(ReconcileStatus::default());
                 };
                 let Some(snapshot_pane) = snapshot_panes.get(pane.key.pane_id.as_str()) else {
-                    self.defer_focus_retry(now);
                     return Ok(ReconcileStatus::default());
                 };
                 if snapshot_pane.workspace_id != *workspace_id || snapshot_pane.tab_id != *tab_id {
-                    self.defer_focus_retry(now);
                     return Ok(ReconcileStatus::default());
                 }
             }
         }
 
-        let tab_panes: Vec<_> = panes
+        let pane_inputs: HashMap<_, _> = panes
             .iter()
-            .filter_map(|pane| {
-                let tab_id = pane.tab_id.clone()?;
-                let context = match outcomes.get(&pane.key) {
-                    Some(BackendOutcome::Resolved { agent, view, .. }) => PaneContext::Supported {
-                        agent: (*agent).to_owned(),
-                        identity: view.session_identity.clone(),
-                        display: view
-                            .tab_name_source
-                            .clone()
-                            .map(DisplayState::Resolved)
-                            .unwrap_or(DisplayState::Unresolved),
-                    },
-                    Some(BackendOutcome::FailedIdentity {
-                        agent,
-                        session_identity,
-                    }) => PaneContext::Supported {
-                        agent: (*agent).to_owned(),
-                        identity: session_identity.clone(),
-                        display: DisplayState::Failed,
-                    },
-                    Some(BackendOutcome::Failed) => self
-                        .panes
-                        .get(&pane.key.pane_id)
-                        .filter(|state| state.reported && state.terminal_id == pane.key.terminal_id)
-                        .map(|state| PaneContext::Supported {
-                            agent: state.agent.clone(),
-                            identity: state.session_identity.clone(),
-                            display: DisplayState::Failed,
-                        })
-                        .unwrap_or(PaneContext::Unsupported),
-                    Some(BackendOutcome::Unbound) | None => PaneContext::Unsupported,
-                };
-                Some(TabPaneSnapshot {
-                    pane_id: pane.key.pane_id.clone(),
-                    tab_id,
-                    context,
-                })
-            })
+            .map(|pane| (pane.key.pane_id.as_str(), pane))
             .collect();
+        let mut tab_panes = Vec::with_capacity(snapshot.panes.len());
+        for tab in &tabs {
+            let layout = layouts[tab.tab_id.as_str()];
+            let mut ordered_panes: Vec<_> = layout.panes.iter().collect();
+            ordered_panes.sort_by_key(|pane| (pane.rect.y, pane.rect.x, pane.pane_id.as_str()));
+            for layout_pane in ordered_panes {
+                let (context, binding_identity) = pane_inputs
+                    .get(layout_pane.pane_id.as_str())
+                    .map_or((PaneContext::Unsupported, None), |pane| {
+                        match outcomes.get(&pane.key) {
+                            Some(BackendOutcome::Resolved {
+                                agent,
+                                binding,
+                                view,
+                            }) => (
+                                PaneContext::Supported {
+                                    agent: (*agent).to_owned(),
+                                    identity: view.session_identity.clone(),
+                                    display: view
+                                        .tab_name_source
+                                        .clone()
+                                        .map(DisplayState::Resolved)
+                                        .unwrap_or(DisplayState::Unresolved),
+                                },
+                                Some(contributor_binding_identity(
+                                    agent,
+                                    binding,
+                                    Some(&view.session_identity),
+                                )),
+                            ),
+                            Some(BackendOutcome::FailedBinding { agent, binding }) => (
+                                PaneContext::Failed {
+                                    agent: (*agent).to_owned(),
+                                },
+                                Some(contributor_binding_identity(agent, binding, None)),
+                            ),
+                            Some(BackendOutcome::FailedIdentity {
+                                agent,
+                                session_identity,
+                            }) => (
+                                PaneContext::Supported {
+                                    agent: (*agent).to_owned(),
+                                    identity: session_identity.clone(),
+                                    display: DisplayState::Failed,
+                                },
+                                Some(session_identity.as_bytes().to_vec()),
+                            ),
+                            Some(BackendOutcome::Failed) => {
+                                let binding = self.backends.binding(&pane.key);
+                                let retained = self.panes.get(&pane.key.pane_id).filter(|state| {
+                                    state.reported
+                                        && state.terminal_id == pane.key.terminal_id
+                                        && state.agent.eq_ignore_ascii_case(&pane.agent)
+                                        && binding
+                                            .is_some_and(|binding| state.binding == binding.path)
+                                });
+                                let context = retained
+                                    .map(|state| PaneContext::Supported {
+                                        agent: state.agent.clone(),
+                                        identity: state.session_identity.clone(),
+                                        display: DisplayState::Failed,
+                                    })
+                                    .unwrap_or(PaneContext::Unsupported);
+                                let binding_identity = binding.map(|binding| {
+                                    contributor_binding_identity(
+                                        retained.map_or(pane.agent.as_str(), |state| {
+                                            state.agent.as_str()
+                                        }),
+                                        binding,
+                                        retained.map(|state| state.session_identity.as_str()),
+                                    )
+                                });
+                                (context, binding_identity)
+                            }
+                            Some(BackendOutcome::Unbound) | None => {
+                                (PaneContext::Unsupported, None)
+                            }
+                        }
+                    });
+                tab_panes.push(TabPaneSnapshot {
+                    pane_id: layout_pane.pane_id.clone(),
+                    terminal_id: pane_inputs
+                        .get(layout_pane.pane_id.as_str())
+                        .map_or_else(String::new, |pane| pane.key.terminal_id.clone()),
+                    binding_identity,
+                    tab_id: tab.tab_id.clone(),
+                    context,
+                });
+            }
+        }
 
         let rename_observations = std::mem::take(&mut self.pending_tab_renames);
         if self
@@ -457,14 +471,6 @@ impl Runtime {
         Ok(ReconcileStatus {
             tab_name_disabled: disable_tab_names,
         })
-    }
-
-    fn defer_focus_retry(&mut self, reconciliation_started_at: Instant) {
-        let detected_at = Instant::now().max(reconciliation_started_at);
-        self.tab_names
-            .as_mut()
-            .unwrap()
-            .defer_due_focus(detected_at);
     }
 
     fn clear_stale_panes<A: HerdrApi>(
@@ -598,4 +604,17 @@ impl Runtime {
         *sequence += 1;
         *sequence
     }
+}
+
+fn contributor_binding_identity(
+    agent: &str,
+    binding: &Binding,
+    session_identity: Option<&str>,
+) -> Vec<u8> {
+    if agent.eq_ignore_ascii_case(CLAUDE_AGENT)
+        && let Some(session_identity) = session_identity
+    {
+        return session_identity.as_bytes().to_vec();
+    }
+    binding.path.as_os_str().as_bytes().to_vec()
 }

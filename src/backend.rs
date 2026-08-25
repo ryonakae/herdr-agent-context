@@ -99,6 +99,10 @@ pub struct DisplayView {
 pub enum BackendOutcome {
     Unbound,
     Failed,
+    FailedBinding {
+        agent: &'static str,
+        binding: Binding,
+    },
     FailedIdentity {
         agent: &'static str,
         session_identity: String,
@@ -133,6 +137,10 @@ impl BackendRegistry {
         let mut outcomes = self.pi.reconcile(config, home, env, panes);
         outcomes.extend(self.claude.reconcile(config, home, env, panes));
         outcomes
+    }
+
+    pub(crate) fn binding(&self, key: &PaneKey) -> Option<&Binding> {
+        self.pi.binding(key).or_else(|| self.claude.binding(key))
     }
 
     pub(crate) fn authoritative_binding(&self, key: &PaneKey) -> Option<&Binding> {

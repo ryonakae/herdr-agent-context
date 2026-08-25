@@ -1,7 +1,7 @@
 use herdr_agent_context::config::Config;
 use herdr_agent_context::herdr::protocol::{
-    AgentInfo, AgentSessionInfo, LAST_MESSAGE_TOKEN, PaneLabelInfo, ProcessInfo,
-    SESSION_NAME_TOKEN, SessionSnapshot, SnapshotPane, TabInfo, TabLayout,
+    AgentInfo, AgentSessionInfo, LAST_MESSAGE_TOKEN, LayoutPane, PaneLabelInfo, PaneRect,
+    ProcessInfo, SESSION_NAME_TOKEN, SessionSnapshot, SnapshotPane, TabInfo, TabLayout,
 };
 use herdr_agent_context::herdr::socket::{EventPoll, SocketError, SocketTransport};
 use herdr_agent_context::herdr::{HerdrApi, MetadataReport};
@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 #[derive(Clone, Debug)]
 struct Report {
@@ -39,7 +39,6 @@ struct FakeApi {
     process_args: HashMap<String, Vec<String>>,
     snapshot: SessionSnapshot,
     snapshot_calls: usize,
-    snapshot_delay: Option<Duration>,
     fail_snapshot_topology: bool,
     renames: Vec<(String, String)>,
     pane_renames: Vec<(String, Option<String>)>,
@@ -73,9 +72,6 @@ impl HerdrApi for FakeApi {
 
     fn session_snapshot(&mut self) -> Result<SessionSnapshot, Self::Error> {
         self.snapshot_calls += 1;
-        if let Some(delay) = self.snapshot_delay {
-            thread::sleep(delay);
-        }
         if self.fail_snapshot_topology {
             return Err(FakeError::Topology);
         }
@@ -167,6 +163,18 @@ fn claude_agent(cwd: &str, pane_id: &str) -> AgentInfo {
     }
 }
 
+fn layout_pane(pane_id: &str, x: u16, y: u16) -> LayoutPane {
+    LayoutPane {
+        pane_id: pane_id.into(),
+        rect: PaneRect {
+            x,
+            y,
+            width: 40,
+            height: 20,
+        },
+    }
+}
+
 fn snapshot_pane(pane_id: &str, workspace_id: &str, tab_id: &str) -> SnapshotPane {
     SnapshotPane {
         pane_id: pane_id.into(),
@@ -186,12 +194,39 @@ fn fake_api() -> FakeApi {
             panes: Vec::new(),
         },
         snapshot_calls: 0,
-        snapshot_delay: None,
         fail_snapshot_topology: false,
         renames: Vec::new(),
         pane_renames: Vec::new(),
         reports: Vec::new(),
         fail_next_clear: false,
+    }
+}
+
+fn single_pi_tab_api(label: &str) -> FakeApi {
+    let mut api = fake_api();
+    api.snapshot = SessionSnapshot {
+        tabs: vec![TabInfo {
+            tab_id: "w1:t1".into(),
+            workspace_id: "w1".into(),
+            number: 1,
+            label: label.into(),
+        }],
+        layouts: vec![TabLayout {
+            workspace_id: "w1".into(),
+            tab_id: "w1:t1".into(),
+            focused_pane_id: "w1:p1".into(),
+            panes: vec![layout_pane("w1:p1", 0, 0)],
+        }],
+        panes: vec![snapshot_pane("w1:p1", "w1", "w1:t1")],
+    };
+    api
+}
+
+fn pi_tab_name_config(root: PathBuf) -> Config {
+    Config {
+        pi_session_dirs: vec![root],
+        tab_name: herdr_agent_context::config::TabNameConfig { enabled: true },
+        ..Config::default()
     }
 }
 
@@ -265,7 +300,7 @@ fn claude_user_only_text(session_id: &str, cwd: &str, title: &str) -> String {
 }
 
 #[test]
-fn tab_name_runtime_renames_from_each_tabs_internal_focus() {
+fn tab_name_runtime_renames_only_tabs_with_resolved_components() {
     let temp = tempfile::tempdir().unwrap();
     let sessions = temp.path().join("sessions");
     let state = temp.path().join("state");
@@ -294,13 +329,13 @@ fn tab_name_runtime_renames_from_each_tabs_internal_focus() {
                 workspace_id: "w1".into(),
                 tab_id: "w1:t1".into(),
                 focused_pane_id: "w1:p-shell".into(),
-                panes: Vec::new(),
+                panes: vec![layout_pane("w1:p-shell", 0, 0)],
             },
             TabLayout {
                 workspace_id: "w1".into(),
                 tab_id: "w1:t2".into(),
                 focused_pane_id: "w1:p1".into(),
-                panes: Vec::new(),
+                panes: vec![layout_pane("w1:p1", 0, 0)],
             },
         ],
         panes: vec![
@@ -342,7 +377,7 @@ fn tab_name_runtime_renames_from_each_tabs_internal_focus() {
 }
 
 #[test]
-fn tab_name_runtime_debounces_focus_without_delaying_metadata() {
+fn tab_name_runtime_uses_layout_order_and_ignores_focus() {
     let temp = tempfile::tempdir().unwrap();
     let pi_root = temp.path().join("pi");
     let claude_root = temp.path().join("claude");
@@ -373,7 +408,7 @@ fn tab_name_runtime_debounces_focus_without_delaying_metadata() {
             workspace_id: "w1".into(),
             tab_id: "w1:t1".into(),
             focused_pane_id: "w1:p1".into(),
-            panes: Vec::new(),
+            panes: vec![layout_pane("w1:p1", 0, 10), layout_pane("w1:p2", 0, 0)],
         }],
         panes: vec![
             snapshot_pane("w1:p1", "w1", "w1:t1"),
@@ -391,37 +426,195 @@ fn tab_name_runtime_debounces_focus_without_delaying_metadata() {
         HashMap::new(),
     );
     runtime
-        .initialize_tab_names(&state, Path::new("/tmp/herdr-focus-runtime.sock"))
+        .initialize_tab_names(&state, Path::new("/tmp/herdr-layout-runtime.sock"))
         .unwrap();
     runtime.reconcile(&mut api).unwrap();
-    assert_eq!(api.renames.last().unwrap().1, "Build context");
-
-    let focus_at = Instant::now();
-    runtime.note_focus(Some("w1:p2"), Some("w1"), focus_at);
     assert_eq!(
-        runtime.next_tab_deadline(),
-        Some(focus_at + Duration::from_millis(150))
+        api.renames,
+        vec![("w1:t1".into(), "Claude name + Build context".into())]
     );
-    api.snapshot.layouts[0].focused_pane_id = "w1:p2".into();
-    runtime
-        .reconcile_at(&mut api, focus_at + Duration::from_millis(149))
-        .unwrap();
+
+    api.snapshot.layouts[0].focused_pane_id = "stale-focus-value".into();
+    runtime.reconcile(&mut api).unwrap();
+
     assert_eq!(api.renames.len(), 1);
     assert_eq!(api.reports.len(), 4);
-    assert_eq!(
-        runtime.next_tab_deadline(),
-        Some(focus_at + Duration::from_millis(150))
-    );
-
-    runtime
-        .reconcile_at(&mut api, focus_at + Duration::from_millis(150))
-        .unwrap();
-    assert_eq!(api.renames.last().unwrap().1, "Claude name");
-    assert_eq!(api.reports.len(), 6);
 }
 
 #[test]
-fn tab_name_stale_pane_membership_retries_without_disabling_sync() {
+fn tab_name_runtime_recomposes_three_panes_across_add_close_move_and_swap() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("claude");
+    let project = root.join("-work-claude");
+    let state = temp.path().join("state");
+    fs::create_dir_all(&project).unwrap();
+    fs::create_dir(&state).unwrap();
+    let duplicate_id = "10000000-0000-4000-8000-000000000001";
+    let third_id = "10000000-0000-4000-8000-000000000003";
+    fs::write(
+        project.join(format!("{duplicate_id}.jsonl")),
+        claude_session_text(duplicate_id, "/work/claude", "Duplicate", "Answer"),
+    )
+    .unwrap();
+    fs::write(
+        project.join(format!("{third_id}.jsonl")),
+        claude_session_text(third_id, "/work/claude", "Third", "Answer"),
+    )
+    .unwrap();
+    let p1 = claude_agent("/work/claude", "w1:p1");
+    let p2 = claude_agent("/work/claude", "w1:p2");
+    let p3 = claude_agent("/work/claude", "w1:p3");
+    let mut api = FakeApi {
+        agents: vec![p1, p2],
+        process_args: HashMap::from([
+            (
+                "w1:p1".into(),
+                vec!["claude".into(), "--session-id".into(), duplicate_id.into()],
+            ),
+            (
+                "w1:p2".into(),
+                vec!["claude".into(), "--session-id".into(), duplicate_id.into()],
+            ),
+            (
+                "w1:p3".into(),
+                vec!["claude".into(), "--session-id".into(), third_id.into()],
+            ),
+        ]),
+        snapshot: SessionSnapshot {
+            tabs: vec![TabInfo {
+                tab_id: "w1:t1".into(),
+                workspace_id: "w1".into(),
+                number: 1,
+                label: "1".into(),
+            }],
+            layouts: vec![TabLayout {
+                workspace_id: "w1".into(),
+                tab_id: "w1:t1".into(),
+                focused_pane_id: "w1:p2".into(),
+                panes: vec![layout_pane("w1:p2", 40, 0), layout_pane("w1:p1", 20, 0)],
+            }],
+            panes: vec![
+                snapshot_pane("w1:p1", "w1", "w1:t1"),
+                snapshot_pane("w1:p2", "w1", "w1:t1"),
+            ],
+        },
+        ..fake_api()
+    };
+    let mut runtime = Runtime::new(
+        Config {
+            claude_session_dirs: vec![root],
+            tab_name: herdr_agent_context::config::TabNameConfig { enabled: true },
+            ..Config::default()
+        },
+        PathBuf::from("/no-home"),
+        HashMap::new(),
+    );
+    runtime
+        .initialize_tab_names(&state, Path::new("/tmp/herdr-lifecycle-runtime.sock"))
+        .unwrap();
+
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(api.renames.last().unwrap().1, "Duplicate + Duplicate");
+
+    api.agents.push(p3);
+    api.snapshot.layouts[0]
+        .panes
+        .push(layout_pane("w1:p3", 20, 0));
+    api.snapshot
+        .panes
+        .push(snapshot_pane("w1:p3", "w1", "w1:t1"));
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(
+        api.renames.last().unwrap().1,
+        "Duplicate + Third + Duplicate"
+    );
+
+    api.agents.retain(|agent| agent.pane_id != "w1:p2");
+    api.snapshot.layouts[0]
+        .panes
+        .retain(|pane| pane.pane_id != "w1:p2");
+    api.snapshot.layouts[0]
+        .panes
+        .iter_mut()
+        .find(|pane| pane.pane_id == "w1:p3")
+        .unwrap()
+        .rect
+        .x = 0;
+    api.snapshot.panes.retain(|pane| pane.pane_id != "w1:p2");
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(api.renames.last().unwrap().1, "Third + Duplicate");
+
+    api.snapshot.tabs.push(TabInfo {
+        tab_id: "w1:t2".into(),
+        workspace_id: "w1".into(),
+        number: 2,
+        label: "2".into(),
+    });
+    api.snapshot.layouts = vec![
+        TabLayout {
+            workspace_id: "w1".into(),
+            tab_id: "w1:t1".into(),
+            focused_pane_id: "w1:p3".into(),
+            panes: vec![layout_pane("w1:p3", 0, 0)],
+        },
+        TabLayout {
+            workspace_id: "w1".into(),
+            tab_id: "w1:t2".into(),
+            focused_pane_id: "w1:p1".into(),
+            panes: vec![layout_pane("w1:p1", 0, 0)],
+        },
+    ];
+    api.snapshot
+        .panes
+        .iter_mut()
+        .find(|pane| pane.pane_id == "w1:p1")
+        .unwrap()
+        .tab_id = "w1:t2".into();
+    api.agents
+        .iter_mut()
+        .find(|agent| agent.pane_id == "w1:p1")
+        .unwrap()
+        .tab_id = Some("w1:t2".into());
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(
+        &api.renames[api.renames.len() - 2..],
+        &[
+            ("w1:t1".into(), "Third".into()),
+            ("w1:t2".into(), "Duplicate".into())
+        ]
+    );
+
+    api.snapshot.layouts[0]
+        .panes
+        .push(layout_pane("w1:p1", 40, 0));
+    api.snapshot.layouts[1].panes.clear();
+    api.snapshot
+        .panes
+        .iter_mut()
+        .find(|pane| pane.pane_id == "w1:p1")
+        .unwrap()
+        .tab_id = "w1:t1".into();
+    api.agents
+        .iter_mut()
+        .find(|agent| agent.pane_id == "w1:p1")
+        .unwrap()
+        .tab_id = Some("w1:t1".into());
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(
+        &api.renames[api.renames.len() - 2..],
+        &[
+            ("w1:t1".into(), "Third + Duplicate".into()),
+            ("w1:t2".into(), "2".into())
+        ]
+    );
+
+    api.snapshot.layouts[0].panes = vec![layout_pane("w1:p3", 40, 0), layout_pane("w1:p1", 0, 0)];
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(api.renames.last().unwrap().1, "Duplicate + Third");
+}
+
+#[test]
+fn tab_name_stale_pane_membership_retries_on_the_next_reconciliation() {
     let temp = tempfile::tempdir().unwrap();
     let state = temp.path().join("state");
     fs::create_dir(&state).unwrap();
@@ -438,7 +631,7 @@ fn tab_name_stale_pane_membership_retries_without_disabling_sync() {
             workspace_id: "w1".into(),
             tab_id: "w1:t1".into(),
             focused_pane_id: "w1:p1".into(),
-            panes: Vec::new(),
+            panes: vec![layout_pane("w1:p1", 0, 0)],
         }],
         panes: vec![snapshot_pane("w1:p1", "w1", "w1:t1")],
     };
@@ -468,37 +661,27 @@ fn tab_name_stale_pane_membership_retries_without_disabling_sync() {
             workspace_id: "w1".into(),
             tab_id: "w1:t1".into(),
             focused_pane_id: "w1:p-shell".into(),
-            panes: Vec::new(),
+            panes: vec![layout_pane("w1:p-shell", 0, 0)],
         },
         TabLayout {
             workspace_id: "w1".into(),
             tab_id: "w1:t2".into(),
             focused_pane_id: "w1:p1".into(),
-            panes: Vec::new(),
+            panes: vec![layout_pane("w1:p1", 0, 0)],
         },
     ];
     api.snapshot.panes = vec![
         snapshot_pane("w1:p-shell", "w1", "w1:t1"),
         snapshot_pane("w1:p1", "w1", "w1:t2"),
     ];
-    let start = Instant::now();
-    runtime.note_focus(Some("w1:p1"), Some("w1"), start);
-    api.snapshot_delay = Some(Duration::from_millis(200));
-    let status = runtime
-        .reconcile_at(&mut api, start + Duration::from_millis(150))
-        .unwrap();
-    let detected_at = Instant::now();
+    let status = runtime.reconcile(&mut api).unwrap();
 
     assert!(!status.tab_name_disabled);
     assert!(runtime.tab_names_available());
     assert_eq!(api.renames.len(), 1);
-    let retry_deadline = runtime.next_tab_deadline().unwrap();
-    assert!(retry_deadline >= detected_at + Duration::from_millis(140));
-    assert!(retry_deadline <= detected_at + Duration::from_millis(200));
 
-    api.snapshot_delay = None;
     api.agents[0].tab_id = Some("w1:t2".into());
-    runtime.reconcile_at(&mut api, retry_deadline).unwrap();
+    runtime.reconcile(&mut api).unwrap();
     assert!(
         api.renames
             .iter()
@@ -556,7 +739,7 @@ fn tab_name_state_failure_disables_only_tab_sync() {
             workspace_id: "w1".into(),
             tab_id: "w1:t1".into(),
             focused_pane_id: "w1:p1".into(),
-            panes: Vec::new(),
+            panes: vec![layout_pane("w1:p1", 0, 0)],
         }],
         panes: vec![snapshot_pane("w1:p1", "w1", "w1:t1")],
     };
@@ -584,128 +767,6 @@ fn tab_name_state_failure_disables_only_tab_sync() {
 }
 
 #[test]
-fn tab_name_unknown_focus_is_scoped_to_its_workspace() {
-    let temp = tempfile::tempdir().unwrap();
-    let state = temp.path().join("state");
-    fs::create_dir(&state).unwrap();
-    fs::write(temp.path().join("session.jsonl"), session_text("")).unwrap();
-    let mut api = fake_api();
-    api.snapshot = SessionSnapshot {
-        tabs: vec![
-            TabInfo {
-                tab_id: "w1:t1".into(),
-                workspace_id: "w1".into(),
-                number: 1,
-                label: "1".into(),
-            },
-            TabInfo {
-                tab_id: "w2:t1".into(),
-                workspace_id: "w2".into(),
-                number: 1,
-                label: "1".into(),
-            },
-        ],
-        layouts: vec![
-            TabLayout {
-                workspace_id: "w1".into(),
-                tab_id: "w1:t1".into(),
-                focused_pane_id: "w1:p1".into(),
-                panes: Vec::new(),
-            },
-            TabLayout {
-                workspace_id: "w2".into(),
-                tab_id: "w2:t1".into(),
-                focused_pane_id: "w2:p-shell".into(),
-                panes: Vec::new(),
-            },
-        ],
-        panes: vec![
-            snapshot_pane("w1:p1", "w1", "w1:t1"),
-            snapshot_pane("w2:p-shell", "w2", "w2:t1"),
-        ],
-    };
-    let mut runtime = Runtime::new(
-        Config {
-            pi_session_dirs: vec![temp.path().to_owned()],
-            tab_name: herdr_agent_context::config::TabNameConfig { enabled: true },
-            ..Config::default()
-        },
-        PathBuf::from("/no-home"),
-        HashMap::new(),
-    );
-    runtime
-        .initialize_tab_names(&state, Path::new("/tmp/herdr-scoped-deadlines.sock"))
-        .unwrap();
-    runtime.reconcile(&mut api).unwrap();
-
-    let start = Instant::now();
-    runtime.note_focus(Some("w1:p1"), Some("w1"), start);
-    runtime.note_focus(
-        Some("w2:p-unknown"),
-        Some("w2"),
-        start + Duration::from_millis(100),
-    );
-
-    assert_eq!(
-        runtime.next_tab_deadline(),
-        Some(start + Duration::from_millis(150))
-    );
-    runtime
-        .reconcile_at(&mut api, start + Duration::from_millis(150))
-        .unwrap();
-    assert_eq!(
-        runtime.next_tab_deadline(),
-        Some(start + Duration::from_millis(250))
-    );
-    runtime
-        .reconcile_at(&mut api, start + Duration::from_millis(250))
-        .unwrap();
-    assert_eq!(runtime.next_tab_deadline(), None);
-}
-
-#[test]
-fn tab_name_disable_hides_unowned_focus_deadline() {
-    let temp = tempfile::tempdir().unwrap();
-    let state = temp.path().join("state");
-    fs::create_dir(&state).unwrap();
-    let mut runtime = Runtime::new(
-        Config {
-            tab_name: herdr_agent_context::config::TabNameConfig { enabled: true },
-            ..Config::default()
-        },
-        PathBuf::from("/no-home"),
-        HashMap::new(),
-    );
-    runtime
-        .initialize_tab_names(&state, Path::new("/tmp/herdr-disable-deadline.sock"))
-        .unwrap();
-    let mut api = fake_api();
-    api.agents.clear();
-    api.snapshot = SessionSnapshot {
-        tabs: vec![TabInfo {
-            tab_id: "w1:t1".into(),
-            workspace_id: "w1".into(),
-            number: 1,
-            label: "1".into(),
-        }],
-        layouts: vec![TabLayout {
-            workspace_id: "w1".into(),
-            tab_id: "w1:t1".into(),
-            focused_pane_id: "w1:p-shell".into(),
-            panes: Vec::new(),
-        }],
-        panes: vec![snapshot_pane("w1:p-shell", "w1", "w1:t1")],
-    };
-    runtime.reconcile(&mut api).unwrap();
-    runtime.note_focus(Some("w1:p-new"), Some("w1"), Instant::now());
-    assert!(runtime.next_tab_deadline().is_some());
-
-    runtime.set_config(Config::default());
-
-    assert_eq!(runtime.next_tab_deadline(), None);
-}
-
-#[test]
 fn tab_name_runtime_restores_manual_event_overwritten_by_plugin_rpc() {
     let temp = tempfile::tempdir().unwrap();
     let state = temp.path().join("state");
@@ -723,7 +784,7 @@ fn tab_name_runtime_restores_manual_event_overwritten_by_plugin_rpc() {
             workspace_id: "w1".into(),
             tab_id: "w1:t1".into(),
             focused_pane_id: "w1:p1".into(),
-            panes: Vec::new(),
+            panes: vec![layout_pane("w1:p1", 0, 0)],
         }],
         panes: vec![snapshot_pane("w1:p1", "w1", "w1:t1")],
     };
@@ -754,8 +815,6 @@ fn tab_name_runtime_is_transport_inert_by_default() {
     fs::write(temp.path().join("session.jsonl"), session_text("")).unwrap();
     let mut api = fake_api();
     let mut runtime = runtime_for(temp.path());
-    runtime.note_focus(Some("w1:p1"), Some("w1"), Instant::now());
-    assert_eq!(runtime.next_tab_deadline(), None);
 
     runtime.reconcile(&mut api).unwrap();
 
@@ -868,7 +927,7 @@ fn tab_name_changed_unresolved_claude_identity_restores_baseline() {
                 workspace_id: "w1".into(),
                 tab_id: "w1:t1".into(),
                 focused_pane_id: "w1:p2".into(),
-                panes: Vec::new(),
+                panes: vec![layout_pane("w1:p2", 0, 0)],
             }],
             panes: vec![snapshot_pane("w1:p2", "w1", "w1:t1")],
         },
@@ -897,6 +956,273 @@ fn tab_name_changed_unresolved_claude_identity_restores_baseline() {
     runtime.reconcile(&mut api).unwrap();
 
     assert_eq!(api.renames.last().unwrap().1, "baseline");
+}
+
+#[test]
+fn tab_name_terminal_replacement_does_not_retain_failed_identity_component() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("claude");
+    let project = root.join("-work-claude");
+    let state = temp.path().join("state");
+    fs::create_dir_all(&project).unwrap();
+    fs::create_dir(&state).unwrap();
+    let session_id = "10000000-0000-4000-8000-000000000001";
+    let session = project.join(format!("{session_id}.jsonl"));
+    fs::write(
+        &session,
+        claude_session_text(session_id, "/work/claude", "First", "Answer"),
+    )
+    .unwrap();
+    let mut claude = claude_agent("/work/claude", "w1:p2");
+    claude.agent_session = Some(AgentSessionInfo {
+        source: "herdr:claude".into(),
+        agent: "claude".into(),
+        kind: "id".into(),
+        value: session_id.into(),
+    });
+    let mut api = FakeApi {
+        agents: vec![claude],
+        process_args: HashMap::from([("w1:p2".into(), vec!["claude".into()])]),
+        snapshot: SessionSnapshot {
+            tabs: vec![TabInfo {
+                tab_id: "w1:t1".into(),
+                workspace_id: "w1".into(),
+                number: 1,
+                label: "baseline".into(),
+            }],
+            layouts: vec![TabLayout {
+                workspace_id: "w1".into(),
+                tab_id: "w1:t1".into(),
+                focused_pane_id: "w1:p2".into(),
+                panes: vec![layout_pane("w1:p2", 0, 0)],
+            }],
+            panes: vec![snapshot_pane("w1:p2", "w1", "w1:t1")],
+        },
+        ..fake_api()
+    };
+    let mut runtime = Runtime::new(
+        Config {
+            claude_session_dirs: vec![root],
+            tab_name: herdr_agent_context::config::TabNameConfig { enabled: true },
+            ..Config::default()
+        },
+        PathBuf::from("/no-home"),
+        HashMap::new(),
+    );
+    runtime
+        .initialize_tab_names(&state, Path::new("/tmp/herdr-terminal-replacement.sock"))
+        .unwrap();
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(api.renames.last().unwrap().1, "First");
+
+    api.agents[0].terminal_id = "replacement-terminal".into();
+    fs::write(&session, "malformed\n").unwrap();
+    runtime.reconcile(&mut api).unwrap();
+
+    assert_eq!(api.renames.last().unwrap().1, "baseline");
+    assert_eq!(api.renames.len(), 2);
+}
+
+#[test]
+fn tab_name_restart_retains_owned_label_when_first_known_identity_read_fails() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("claude");
+    let project = root.join("-work-claude");
+    let state = temp.path().join("state");
+    fs::create_dir_all(&project).unwrap();
+    fs::create_dir(&state).unwrap();
+    let session_id = "10000000-0000-4000-8000-000000000001";
+    let session = project.join(format!("{session_id}.jsonl"));
+    fs::write(
+        &session,
+        claude_session_text(session_id, "/work/claude", "First", "Answer"),
+    )
+    .unwrap();
+    let mut claude = claude_agent("/work/claude", "w1:p2");
+    claude.agent_session = Some(AgentSessionInfo {
+        source: "herdr:claude".into(),
+        agent: "claude".into(),
+        kind: "id".into(),
+        value: session_id.into(),
+    });
+    let mut api = FakeApi {
+        agents: vec![claude],
+        process_args: HashMap::from([("w1:p2".into(), vec!["claude".into()])]),
+        snapshot: SessionSnapshot {
+            tabs: vec![TabInfo {
+                tab_id: "w1:t1".into(),
+                workspace_id: "w1".into(),
+                number: 1,
+                label: "baseline".into(),
+            }],
+            layouts: vec![TabLayout {
+                workspace_id: "w1".into(),
+                tab_id: "w1:t1".into(),
+                focused_pane_id: "w1:p2".into(),
+                panes: vec![layout_pane("w1:p2", 0, 0)],
+            }],
+            panes: vec![snapshot_pane("w1:p2", "w1", "w1:t1")],
+        },
+        ..fake_api()
+    };
+    let config = || Config {
+        claude_session_dirs: vec![root.clone()],
+        tab_name: herdr_agent_context::config::TabNameConfig { enabled: true },
+        ..Config::default()
+    };
+    let socket = Path::new("/tmp/herdr-restart-known-failure.sock");
+    let mut runtime = Runtime::new(config(), PathBuf::from("/no-home"), HashMap::new());
+    runtime.initialize_tab_names(&state, socket).unwrap();
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(api.renames.last().unwrap().1, "First");
+    drop(runtime);
+
+    fs::write(&session, "malformed\n").unwrap();
+    let mut restarted = Runtime::new(config(), PathBuf::from("/no-home"), HashMap::new());
+    restarted.initialize_tab_names(&state, socket).unwrap();
+    restarted.reconcile(&mut api).unwrap();
+
+    assert_eq!(api.renames, vec![("w1:t1".into(), "First".into())]);
+    drop(restarted);
+
+    let mut disabled = Runtime::new(
+        Config {
+            claude_session_dirs: vec![root],
+            ..Config::default()
+        },
+        PathBuf::from("/no-home"),
+        HashMap::new(),
+    );
+    disabled.initialize_tab_names(&state, socket).unwrap();
+    disabled.reconcile(&mut api).unwrap();
+
+    assert_eq!(
+        api.renames,
+        vec![
+            ("w1:t1".into(), "First".into()),
+            ("w1:t1".into(), "baseline".into())
+        ]
+    );
+}
+
+#[test]
+fn tab_name_restart_retains_pi_local_fallback_when_first_read_fails() {
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let state = temp.path().join("state");
+    fs::create_dir(&sessions).unwrap();
+    fs::create_dir(&state).unwrap();
+    let session = sessions.join("session-a.jsonl");
+    let valid = pi_session_text("/work/project", "First", "Answer");
+    fs::write(&session, &valid).unwrap();
+    let mut api = single_pi_tab_api("baseline");
+    let socket = Path::new("/tmp/herdr-pi-local-failure-restart.sock");
+
+    let mut runtime = Runtime::new(
+        pi_tab_name_config(sessions.clone()),
+        PathBuf::from("/no-home"),
+        HashMap::new(),
+    );
+    runtime.initialize_tab_names(&state, socket).unwrap();
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(api.renames, vec![("w1:t1".into(), "First".into())]);
+    drop(runtime);
+
+    fs::write(&session, format!("{valid}malformed\n")).unwrap();
+    let mut restarted = Runtime::new(
+        pi_tab_name_config(sessions),
+        PathBuf::from("/no-home"),
+        HashMap::new(),
+    );
+    restarted.initialize_tab_names(&state, socket).unwrap();
+    restarted.reconcile(&mut api).unwrap();
+
+    assert_eq!(api.renames, vec![("w1:t1".into(), "First".into())]);
+}
+
+#[test]
+fn tab_name_restart_releases_pi_local_fallback_after_terminal_replacement() {
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let state = temp.path().join("state");
+    fs::create_dir(&sessions).unwrap();
+    fs::create_dir(&state).unwrap();
+    let session = sessions.join("session-a.jsonl");
+    let valid = pi_session_text("/work/project", "First", "Answer");
+    fs::write(&session, &valid).unwrap();
+    let mut api = single_pi_tab_api("baseline");
+    let socket = Path::new("/tmp/herdr-pi-terminal-restart.sock");
+
+    let mut runtime = Runtime::new(
+        pi_tab_name_config(sessions.clone()),
+        PathBuf::from("/no-home"),
+        HashMap::new(),
+    );
+    runtime.initialize_tab_names(&state, socket).unwrap();
+    runtime.reconcile(&mut api).unwrap();
+    drop(runtime);
+
+    api.agents[0].terminal_id = "replacement-terminal".into();
+    fs::write(&session, format!("{valid}malformed\n")).unwrap();
+    let mut restarted = Runtime::new(
+        pi_tab_name_config(sessions),
+        PathBuf::from("/no-home"),
+        HashMap::new(),
+    );
+    restarted.initialize_tab_names(&state, socket).unwrap();
+    restarted.reconcile(&mut api).unwrap();
+
+    assert_eq!(api.renames.last().unwrap().1, "baseline");
+    assert_eq!(api.renames.len(), 2);
+}
+
+#[test]
+fn tab_name_restart_releases_pi_local_fallback_after_binding_replacement() {
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let state = temp.path().join("state");
+    fs::create_dir(&sessions).unwrap();
+    fs::create_dir(&state).unwrap();
+    let first = sessions.join("session-a.jsonl");
+    fs::write(&first, pi_session_text("/work/project", "First", "Answer")).unwrap();
+    let mut api = single_pi_tab_api("baseline");
+    let socket = Path::new("/tmp/herdr-pi-binding-restart.sock");
+
+    let mut runtime = Runtime::new(
+        pi_tab_name_config(sessions.clone()),
+        PathBuf::from("/no-home"),
+        HashMap::new(),
+    );
+    runtime.initialize_tab_names(&state, socket).unwrap();
+    runtime.reconcile(&mut api).unwrap();
+    drop(runtime);
+
+    let now = std::time::SystemTime::now();
+    fs::File::options()
+        .write(true)
+        .open(&first)
+        .unwrap()
+        .set_modified(now - Duration::from_secs(10))
+        .unwrap();
+    let second = sessions.join("session-b.jsonl");
+    let replacement = pi_session_text("/work/project", "Replacement", "Answer");
+    fs::write(&second, format!("{replacement}malformed\n")).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&second)
+        .unwrap()
+        .set_modified(now)
+        .unwrap();
+    let mut restarted = Runtime::new(
+        pi_tab_name_config(sessions),
+        PathBuf::from("/no-home"),
+        HashMap::new(),
+    );
+    restarted.initialize_tab_names(&state, socket).unwrap();
+    restarted.reconcile(&mut api).unwrap();
+
+    assert_eq!(api.renames.last().unwrap().1, "baseline");
+    assert_eq!(api.renames.len(), 2);
 }
 
 #[test]
@@ -1344,6 +1670,51 @@ fn runtime_does_not_refresh_ttl_after_parse_failure_and_recovers() {
     );
 }
 
+#[test]
+fn tab_name_retains_local_fallback_pi_component_during_parse_failure() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = temp.path().join("state");
+    fs::create_dir(&state).unwrap();
+    let session = temp.path().join("session.jsonl");
+    fs::write(&session, session_text("")).unwrap();
+    let mut runtime = Runtime::new(
+        Config {
+            pi_session_dirs: vec![temp.path().to_owned()],
+            tab_name: herdr_agent_context::config::TabNameConfig { enabled: true },
+            ..Config::default()
+        },
+        PathBuf::from("/no-home"),
+        HashMap::new(),
+    );
+    runtime
+        .initialize_tab_names(&state, Path::new("/tmp/herdr-pi-local-failure.sock"))
+        .unwrap();
+    let mut api = fake_api();
+    api.snapshot = SessionSnapshot {
+        tabs: vec![TabInfo {
+            tab_id: "w1:t1".into(),
+            workspace_id: "w1".into(),
+            number: 1,
+            label: "baseline".into(),
+        }],
+        layouts: vec![TabLayout {
+            workspace_id: "w1".into(),
+            tab_id: "w1:t1".into(),
+            focused_pane_id: "w1:p1".into(),
+            panes: vec![layout_pane("w1:p1", 0, 0)],
+        }],
+        panes: vec![snapshot_pane("w1:p1", "w1", "w1:t1")],
+    };
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(api.renames, vec![("w1:t1".into(), "Build context".into())]);
+
+    fs::write(&session, format!("{}{{", session_text(""))).unwrap();
+    runtime.reconcile(&mut api).unwrap();
+
+    assert_eq!(api.renames, vec![("w1:t1".into(), "Build context".into())]);
+    assert_eq!(api.reports.len(), 1);
+}
+
 #[cfg(unix)]
 #[test]
 fn runtime_stops_refreshing_when_cached_session_becomes_unreadable() {
@@ -1750,7 +2121,11 @@ fn tab_name_listener_binary_preserves_manual_rename_before_rpc_ack() {
                             "focused":true,"pane_count":1,"agent_status":"working"
                         }],
                         "layouts":[{
-                            "workspace_id":"w1","tab_id":"w1:t1","focused_pane_id":"w1:p1"
+                            "workspace_id":"w1","tab_id":"w1:t1","focused_pane_id":"w1:p1",
+                            "panes":[{
+                                "pane_id":"w1:p1",
+                                "rect":{"x":0,"y":0,"width":80,"height":24}
+                            }]
                         }],
                         "workspaces":[],
                         "panes":[{"pane_id":"w1:p1","workspace_id":"w1","tab_id":"w1:t1"}],

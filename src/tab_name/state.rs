@@ -66,7 +66,8 @@ pub(crate) enum Baseline {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Selection {
-    pub(crate) pane_id: String,
+    #[serde(rename = "pane_id")]
+    pub(crate) generation_digest: String,
     pub(crate) identity_digest: String,
 }
 
@@ -345,6 +346,34 @@ pub(crate) fn digest_identity(tab_id: &str, agent: &str, identity: &str) -> Stri
     )
 }
 
+pub(crate) fn digest_composition(tab_id: &str, identities: &[(&str, &str)]) -> String {
+    if let [(agent, identity)] = identities {
+        return digest_identity(tab_id, agent, identity);
+    }
+
+    let mut parts = Vec::with_capacity(1 + identities.len() * 2);
+    parts.push(tab_id.as_bytes());
+    for (agent, identity) in identities {
+        parts.push(agent.as_bytes());
+        parts.push(identity.as_bytes());
+    }
+    digest_parts(b"herdr-agent-context/tab-name/composition/v1", &parts)
+}
+
+pub(crate) fn digest_contributor_generations(generations: &[(&str, &str, &str, &[u8])]) -> String {
+    let mut parts = Vec::with_capacity(generations.len() * 4);
+    for (pane_id, terminal_id, agent, binding_identity) in generations {
+        parts.push(pane_id.as_bytes());
+        parts.push(terminal_id.as_bytes());
+        parts.push(agent.as_bytes());
+        parts.push(binding_identity);
+    }
+    digest_parts(
+        b"herdr-agent-context/tab-name/contributor-generations/v1",
+        &parts,
+    )
+}
+
 fn digest_socket_path(socket_path: &Path) -> String {
     digest_parts(
         b"herdr-agent-context/tab-name/socket/v1",
@@ -598,6 +627,9 @@ mod tests {
     const SOCKET_B: &str = "/synthetic/herdr/socket-b";
     const GENERATED_TITLE: &str = "synthetic generated title must not persist";
     const RAW_IDENTITY: &str = "synthetic-identity-not-for-storage";
+    const RAW_PANE_ID: &str = "synthetic-pane-not-for-storage";
+    const RAW_TERMINAL_ID: &str = "synthetic-terminal-not-for-storage";
+    const RAW_BINDING_IDENTITY: &str = "/synthetic/binding-not-for-storage.jsonl";
 
     fn sample_tab_state() -> TabState {
         let identity_digest = digest_identity("tab-a", "pi", RAW_IDENTITY);
@@ -606,7 +638,12 @@ mod tests {
                 value: "Manual baseline label".to_owned(),
             },
             selection: Some(Selection {
-                pane_id: "pane-a".to_owned(),
+                generation_digest: digest_contributor_generations(&[(
+                    RAW_PANE_ID,
+                    RAW_TERMINAL_ID,
+                    "pi",
+                    RAW_BINDING_IDENTITY.as_bytes(),
+                )]),
                 identity_digest: identity_digest.clone(),
             }),
             overrides: BTreeMap::from([(
@@ -648,6 +685,69 @@ mod tests {
         fs::write(path, contents).expect("write state document");
         fs::set_permissions(path, fs::Permissions::from_mode(FILE_MODE))
             .expect("set state document mode");
+    }
+
+    #[test]
+    fn singleton_composition_keeps_the_existing_identity_digest() {
+        assert_eq!(
+            digest_composition("tab-a", &[("pi", RAW_IDENTITY)]),
+            digest_identity("tab-a", "pi", RAW_IDENTITY)
+        );
+    }
+
+    #[test]
+    fn multi_composition_digest_is_ordered_and_length_framed() {
+        let alpha_beta = digest_composition("tab-a", &[("pi", "alpha"), ("claude", "beta")]);
+        let beta_alpha = digest_composition("tab-a", &[("claude", "beta"), ("pi", "alpha")]);
+        let different_boundary =
+            digest_composition("tab-a", &[("pi", "alphaclaude"), ("", "beta")]);
+
+        assert_ne!(alpha_beta, beta_alpha);
+        assert_ne!(alpha_beta, different_boundary);
+        assert_ne!(
+            alpha_beta,
+            digest_identity("tab-a", "pi", "alphaclaudebeta")
+        );
+    }
+
+    #[test]
+    fn contributor_generation_digest_is_ordered_and_length_framed() {
+        let alpha_beta = digest_contributor_generations(&[
+            ("pane-a", "alpha", "pi", b"binding-a"),
+            ("pane-b", "beta", "claude", b"binding-b"),
+        ]);
+        let beta_alpha = digest_contributor_generations(&[
+            ("pane-b", "beta", "claude", b"binding-b"),
+            ("pane-a", "alpha", "pi", b"binding-a"),
+        ]);
+        let different_boundary = digest_contributor_generations(&[
+            ("pane-aalpha", "", "pi", b"binding-a"),
+            ("pane-b", "beta", "claude", b"binding-b"),
+        ]);
+        let different_agent = digest_contributor_generations(&[
+            ("pane-a", "alpha", "claude", b"binding-a"),
+            ("pane-b", "beta", "claude", b"binding-b"),
+        ]);
+        let different_binding = digest_contributor_generations(&[
+            ("pane-a", "alpha", "pi", b"replacement"),
+            ("pane-b", "beta", "claude", b"binding-b"),
+        ]);
+
+        assert_ne!(alpha_beta, beta_alpha);
+        assert_ne!(alpha_beta, different_boundary);
+        assert_ne!(alpha_beta, different_agent);
+        assert_ne!(alpha_beta, different_binding);
+        assert!(!alpha_beta.contains("alpha"));
+        assert!(!alpha_beta.contains("pane-a"));
+        assert!(!alpha_beta.contains("binding-a"));
+    }
+
+    #[test]
+    fn selection_keeps_the_existing_serialized_anchor_key() {
+        let value = serde_json::to_value(sample_tab_state().selection.unwrap()).unwrap();
+
+        assert!(value.get("pane_id").is_some());
+        assert!(value.get("generation_digest").is_none());
     }
 
     #[test]
@@ -714,6 +814,9 @@ mod tests {
         assert!(serialized.contains("Manual override label"));
         assert!(!serialized.contains(GENERATED_TITLE));
         assert!(!serialized.contains(RAW_IDENTITY));
+        assert!(!serialized.contains(RAW_PANE_ID));
+        assert!(!serialized.contains(RAW_TERMINAL_ID));
+        assert!(!serialized.contains(RAW_BINDING_IDENTITY));
         assert!(!serialized.contains(SOCKET_A));
     }
 

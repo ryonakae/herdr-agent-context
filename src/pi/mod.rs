@@ -29,11 +29,12 @@ struct FileFingerprint {
 }
 
 impl PiBackend {
+    pub(crate) fn binding(&self, key: &PaneKey) -> Option<&crate::backend::Binding> {
+        self.resolver.bindings().get(key)
+    }
+
     pub(crate) fn authoritative_binding(&self, key: &PaneKey) -> Option<&crate::backend::Binding> {
-        self.resolver
-            .bindings()
-            .get(key)
-            .filter(|binding| binding.is_official())
+        self.binding(key).filter(|binding| binding.is_official())
     }
 
     pub fn reconcile(
@@ -65,7 +66,10 @@ impl PiBackend {
                             binding: binding.clone(),
                             view,
                         },
-                        None => BackendOutcome::Failed,
+                        None => BackendOutcome::FailedBinding {
+                            agent: PI_AGENT,
+                            binding: binding.clone(),
+                        },
                     },
                 };
                 (pane.key.clone(), outcome)

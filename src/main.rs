@@ -124,23 +124,9 @@ fn listen_forever(
             }
 
             let wait_started = Instant::now();
-            let event = transport.poll_event(next_wait(
-                &schedule,
-                runtime.next_tab_deadline(),
-                wait_started,
-                immediate_reconcile,
-            ));
+            let event =
+                transport.poll_event(next_wait(&schedule, wait_started, immediate_reconcile));
             let event_reconcile = match event {
-                EventPoll::Event(event)
-                    if event.kind == "pane_focused" || event.kind == "pane.focused" =>
-                {
-                    runtime.note_focus(
-                        event.pane_id.as_deref(),
-                        event.workspace_id.as_deref(),
-                        Instant::now(),
-                    );
-                    false
-                }
                 EventPoll::Event(event)
                     if event.kind == "tab_renamed" || event.kind == "tab.renamed" =>
                 {
@@ -159,10 +145,7 @@ fn listen_forever(
             };
             let now = Instant::now();
             let poll_due = schedule.is_due(now);
-            let tab_due = runtime
-                .next_tab_deadline()
-                .is_some_and(|deadline| now >= deadline);
-            if !immediate_reconcile && !event_reconcile && !poll_due && !tab_due {
+            if !immediate_reconcile && !event_reconcile && !poll_due {
                 continue;
             }
             match runtime.reconcile_at(&mut transport, now) {
@@ -235,21 +218,12 @@ struct PollSchedule {
     deadline: Instant,
 }
 
-fn next_wait(
-    schedule: &PollSchedule,
-    tab_deadline: Option<Instant>,
-    now: Instant,
-    immediate: bool,
-) -> Duration {
+fn next_wait(schedule: &PollSchedule, now: Instant, immediate: bool) -> Duration {
     if immediate {
-        return Duration::ZERO;
+        Duration::ZERO
+    } else {
+        schedule.remaining(now)
     }
-    tab_deadline
-        .map(|deadline| deadline.saturating_duration_since(now))
-        .map_or_else(
-            || schedule.remaining(now),
-            |tab| tab.min(schedule.remaining(now)),
-        )
 }
 
 impl PollSchedule {
@@ -343,20 +317,12 @@ mod tests {
     }
 
     #[test]
-    fn poll_deadline_is_not_extended_by_events_or_tab_debounce() {
+    fn poll_deadline_is_not_extended_by_events() {
         let start = Instant::now();
         let mut schedule = PollSchedule::new(start, Duration::from_secs(2));
         let original = schedule.deadline;
-        assert_eq!(
-            next_wait(
-                &schedule,
-                Some(start + Duration::from_millis(150)),
-                start,
-                false,
-            ),
-            Duration::from_millis(150)
-        );
-        assert_eq!(next_wait(&schedule, None, start, true), Duration::ZERO);
+        assert_eq!(next_wait(&schedule, start, false), Duration::from_secs(2));
+        assert_eq!(next_wait(&schedule, start, true), Duration::ZERO);
         assert!(!schedule.is_due(start + Duration::from_millis(150)));
         assert_eq!(schedule.deadline, original);
         assert!(schedule.is_due(start + Duration::from_secs(2)));
