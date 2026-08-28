@@ -25,6 +25,7 @@ pub struct Config {
     pub metadata_ttl_ms: u64,
     pub pi_session_dirs: Vec<PathBuf>,
     pub claude_session_dirs: Vec<PathBuf>,
+    pub codex_session_dirs: Vec<PathBuf>,
     pub tab_name: TabNameConfig,
     pub pane_name: PaneNameConfig,
 }
@@ -36,6 +37,7 @@ impl Default for Config {
             metadata_ttl_ms: DEFAULT_METADATA_TTL_MS,
             pi_session_dirs: Vec::new(),
             claude_session_dirs: Vec::new(),
+            codex_session_dirs: Vec::new(),
             tab_name: TabNameConfig::default(),
             pane_name: PaneNameConfig::default(),
         }
@@ -70,6 +72,7 @@ struct RawPaneNameConfig {
 struct RawAgents {
     pi: Option<RawAgentConfig>,
     claude: Option<RawAgentConfig>,
+    codex: Option<RawAgentConfig>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -174,11 +177,19 @@ impl Config {
                 .unwrap_or_default(),
             home,
         )?;
+        let codex_session_dirs = normalize_config_paths(
+            agents
+                .codex
+                .and_then(|codex| codex.session_dirs)
+                .unwrap_or_default(),
+            home,
+        )?;
         let config = Self {
             poll_interval_ms: raw.poll_interval_ms.unwrap_or(DEFAULT_POLL_INTERVAL_MS),
             metadata_ttl_ms: raw.metadata_ttl_ms.unwrap_or(DEFAULT_METADATA_TTL_MS),
             pi_session_dirs,
             claude_session_dirs,
+            codex_session_dirs,
             tab_name: TabNameConfig {
                 enabled: raw
                     .tab_name
@@ -236,6 +247,20 @@ pub fn resolve_session_roots(
         .filter(|value| !value.is_empty())
         .and_then(|value| normalize_env_path(Path::new(value), home))
         .unwrap_or_else(|| resolve_pi_agent_dir(env, home).join("sessions"));
+    merge_roots(primary, additional)
+}
+
+pub fn resolve_codex_session_roots(
+    env: &HashMap<String, String>,
+    home: &Path,
+    additional: &[PathBuf],
+) -> Vec<PathBuf> {
+    let primary = env
+        .get("CODEX_HOME")
+        .filter(|value| !value.is_empty())
+        .and_then(|value| normalize_env_path(Path::new(value), home))
+        .map(|path| path.join("sessions"))
+        .unwrap_or_else(|| home.join(".codex/sessions"));
     merge_roots(primary, additional)
 }
 
@@ -408,9 +433,50 @@ mod tests {
             Config::from_toml("pi_session_dirs = []\n[agents.pi]\nsession_dirs = []", home)
                 .is_err()
         );
-        assert!(Config::from_toml("[agents.codex]\nsession_dirs = []", home).is_err());
+        assert!(Config::from_toml("[agents.unknown]\nsession_dirs = []", home).is_err());
         assert!(Config::from_toml("[agents.pi]\nunknown = true", home).is_err());
         assert!(Config::from_toml("[agents.pi]\nsession_dirs = [\"relative\"]", home).is_err());
+    }
+
+    #[test]
+    fn resolves_strict_codex_config_and_listener_home_roots() {
+        let home = Path::new("/home/me");
+        let config = Config::from_toml(
+            "[agents.codex]\nsession_dirs = [\"~/extra/sessions\", \"/shared/sessions\", \"/shared/sessions\"]",
+            home,
+        )
+        .unwrap();
+        assert_eq!(
+            config.codex_session_dirs,
+            vec![
+                PathBuf::from("/home/me/extra/sessions"),
+                PathBuf::from("/shared/sessions"),
+                PathBuf::from("/shared/sessions")
+            ]
+        );
+
+        let mut env = HashMap::new();
+        assert_eq!(
+            resolve_codex_session_roots(&env, home, &config.codex_session_dirs),
+            vec![
+                PathBuf::from("/home/me/.codex/sessions"),
+                PathBuf::from("/home/me/extra/sessions"),
+                PathBuf::from("/shared/sessions")
+            ]
+        );
+        env.insert("CODEX_HOME".into(), "~/codex-work".into());
+        assert_eq!(
+            resolve_codex_session_roots(&env, home, &[]),
+            vec![PathBuf::from("/home/me/codex-work/sessions")]
+        );
+        env.insert("CODEX_HOME".into(), "relative".into());
+        assert_eq!(
+            resolve_codex_session_roots(&env, home, &[]),
+            vec![PathBuf::from("/home/me/.codex/sessions")]
+        );
+
+        assert!(Config::from_toml("[agents.codex]\nunknown = true", home).is_err());
+        assert!(Config::from_toml("[agents.codex]\nsession_dirs = [\"relative\"]", home).is_err());
     }
 
     #[test]

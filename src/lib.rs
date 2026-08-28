@@ -1,5 +1,6 @@
 pub mod backend;
 pub mod claude;
+pub mod codex;
 pub mod config;
 pub mod herdr;
 pub mod pane_name;

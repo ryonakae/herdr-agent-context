@@ -66,13 +66,20 @@ impl HerdrApi for FakeApi {
     }
 
     fn process_info(&mut self, pane_id: &str) -> Result<ProcessInfo, Self::Error> {
+        let argv = self.process_args.get(pane_id).cloned().unwrap_or_default();
+        let executable = argv
+            .first()
+            .and_then(|value| Path::new(value).file_name())
+            .and_then(|value| value.to_str())
+            .unwrap_or_default()
+            .to_owned();
         Ok(ProcessInfo {
             pane_id: pane_id.to_owned(),
             foreground_processes: vec![herdr_agent_context::herdr::protocol::Process {
                 pid: 1,
-                name: "pi".into(),
-                argv: Some(self.process_args.get(pane_id).cloned().unwrap_or_default()),
-                argv0: Some("pi".into()),
+                name: executable.clone(),
+                argv: Some(argv),
+                argv0: Some(executable),
                 cmdline: None,
             }],
         })
@@ -171,11 +178,19 @@ fn agent() -> AgentInfo {
 }
 
 fn claude_agent(cwd: &str, pane_id: &str) -> AgentInfo {
+    supported_agent("claude", cwd, pane_id)
+}
+
+fn codex_agent(cwd: &str, pane_id: &str) -> AgentInfo {
+    supported_agent("codex", cwd, pane_id)
+}
+
+fn supported_agent(agent: &str, cwd: &str, pane_id: &str) -> AgentInfo {
     AgentInfo {
         terminal_id: format!("term-{pane_id}"),
         workspace_id: Some(pane_id.split(':').next().unwrap_or("w1").into()),
         tab_id: Some(format!("{}:t1", pane_id.split(':').next().unwrap_or("w1"))),
-        agent: Some("claude".into()),
+        agent: Some(agent.into()),
         agent_status: "working".into(),
         cwd: Some(cwd.into()),
         foreground_cwd: Some(cwd.into()),
@@ -337,6 +352,66 @@ fn claude_user_only_text(session_id: &str, cwd: &str, title: &str) -> String {
         session_id = session_id,
         cwd = cwd,
         title = title
+    )
+}
+
+fn codex_rollout_text(
+    session_id: &str,
+    cwd: &str,
+    first_user: &str,
+    events: &[(&str, Option<&str>)],
+) -> String {
+    let mut text = format!(
+        "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{session_id}\",\"cwd\":\"{cwd}\",\"source\":\"cli\"}}}}\n"
+    );
+    text.push_str(
+        &json!({"type": "event_msg", "payload": {"type": "user_message", "message": first_user}})
+            .to_string(),
+    );
+    text.push('\n');
+    for (message, phase) in events {
+        let payload = match phase {
+            Some(phase) => json!({"type": "agent_message", "message": message, "phase": phase}),
+            None => json!({"type": "user_message", "message": message}),
+        };
+        text.push_str(&json!({"type": "event_msg", "payload": payload}).to_string());
+        text.push('\n');
+    }
+    text
+}
+
+fn write_codex_rollout(
+    root: &Path,
+    session_id: &str,
+    cwd: &str,
+    first_user: &str,
+    events: &[(&str, Option<&str>)],
+) -> PathBuf {
+    let day = root.join("2026/08/28");
+    fs::create_dir_all(&day).unwrap();
+    let path = day.join(format!("rollout-2026-08-28T00-00-00-{session_id}.jsonl"));
+    fs::write(
+        &path,
+        codex_rollout_text(session_id, cwd, first_user, events),
+    )
+    .unwrap();
+    path
+}
+
+fn codex_runtime(root: PathBuf, tab_enabled: bool, pane_enabled: bool) -> Runtime {
+    Runtime::new(
+        Config {
+            codex_session_dirs: vec![root],
+            tab_name: herdr_agent_context::config::TabNameConfig {
+                enabled: tab_enabled,
+            },
+            pane_name: herdr_agent_context::config::PaneNameConfig {
+                enabled: pane_enabled,
+            },
+            ..Config::default()
+        },
+        PathBuf::from("/no-home"),
+        HashMap::new(),
     )
 }
 
@@ -2654,6 +2729,1013 @@ fn authoritative_unreadable_path_never_uses_valid_fallback() {
     runtime.reconcile(&mut api).unwrap();
     assert_eq!(api.reports.len(), 1);
     assert_eq!(api.reports[0].applies_to_source, None);
+}
+
+#[test]
+fn codex_runtime_reports_mixed_agents_and_scopes_only_official_identity() {
+    let temp = tempfile::tempdir().unwrap();
+    let pi_root = temp.path().join("pi");
+    let claude_root = temp.path().join("claude");
+    let claude_project = claude_root.join("-synthetic-claude");
+    let codex_root = temp.path().join("codex/sessions");
+    fs::create_dir_all(&pi_root).unwrap();
+    fs::create_dir_all(&claude_project).unwrap();
+    fs::write(
+        pi_root.join("session.jsonl"),
+        pi_session_text("/synthetic/pi", "Pi task", "Pi answer"),
+    )
+    .unwrap();
+    let claude_id = "10000000-0000-4000-8000-000000000001";
+    fs::write(
+        claude_project.join(format!("{claude_id}.jsonl")),
+        claude_session_text(
+            claude_id,
+            "/synthetic/claude",
+            "Claude task",
+            "Claude answer",
+        ),
+    )
+    .unwrap();
+    let official_id = "20000000-0000-4000-8000-000000000001";
+    let exact_id = "20000000-0000-4000-8000-000000000002";
+    write_codex_rollout(
+        &codex_root,
+        official_id,
+        "/synthetic/codex-official",
+        "Official task",
+        &[("Official answer", Some("final_answer"))],
+    );
+    write_codex_rollout(
+        &codex_root,
+        exact_id,
+        "/synthetic/codex-exact",
+        "Exact task",
+        &[("Exact answer", Some("commentary"))],
+    );
+
+    let mut pi = supported_agent("pi", "/synthetic/pi", "w1:p1");
+    pi.tab_id = Some("w1:t1".into());
+    let claude = claude_agent("/synthetic/claude", "w1:p2");
+    let mut official = codex_agent("/synthetic/codex-official", "w1:p3");
+    official.agent_session = Some(AgentSessionInfo {
+        source: "herdr:codex".into(),
+        agent: "codex".into(),
+        kind: "id".into(),
+        value: official_id.into(),
+    });
+    let exact = codex_agent("/synthetic/codex-exact", "w1:p4");
+    let mut api = FakeApi {
+        agents: vec![pi, claude, official, exact],
+        process_args: HashMap::from([
+            ("w1:p1".into(), vec!["pi".into()]),
+            (
+                "w1:p2".into(),
+                vec!["claude".into(), "--session-id".into(), claude_id.into()],
+            ),
+            ("w1:p3".into(), vec!["codex".into()]),
+            (
+                "w1:p4".into(),
+                vec!["codex".into(), "resume".into(), exact_id.into()],
+            ),
+        ]),
+        ..fake_api()
+    };
+    let mut runtime = Runtime::new(
+        Config {
+            pi_session_dirs: vec![pi_root],
+            claude_session_dirs: vec![claude_root],
+            codex_session_dirs: vec![codex_root],
+            ..Config::default()
+        },
+        PathBuf::from("/no-home"),
+        HashMap::new(),
+    );
+
+    runtime.reconcile(&mut api).unwrap();
+
+    assert_eq!(api.reports.len(), 4);
+    for (pane_id, agent, name, activity) in [
+        ("w1:p1", "pi", "Pi task", "Pi answer"),
+        ("w1:p2", "claude", "Claude task", "Claude answer"),
+        ("w1:p3", "codex", "Official task", "Official answer"),
+        ("w1:p4", "codex", "Exact task", "Exact answer"),
+    ] {
+        let report = api
+            .reports
+            .iter()
+            .find(|report| report.pane_id == pane_id)
+            .unwrap();
+        assert_eq!(report.agent, agent);
+        assert_eq!(report.session_name.as_deref(), Some(name));
+        assert_eq!(report.last_message.as_deref(), Some(activity));
+    }
+    assert_eq!(
+        api.reports
+            .iter()
+            .find(|report| report.pane_id == "w1:p3")
+            .unwrap()
+            .applies_to_source
+            .as_deref(),
+        Some("herdr:codex")
+    );
+    assert_eq!(
+        api.reports
+            .iter()
+            .find(|report| report.pane_id == "w1:p4")
+            .unwrap()
+            .applies_to_source,
+        None
+    );
+}
+
+#[test]
+fn codex_local_fallback_waits_for_change_and_remains_visual_only() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("codex/sessions");
+    let id = "25000000-0000-4000-8000-000000000001";
+    let rollout = write_codex_rollout(
+        &root,
+        id,
+        "/synthetic/codex",
+        "Fallback task",
+        &[("Fallback answer", Some("final_answer"))],
+    );
+    let mut api = FakeApi {
+        agents: vec![codex_agent("/synthetic/codex", "w1:p1")],
+        process_args: HashMap::from([("w1:p1".into(), vec!["codex".into()])]),
+        ..fake_api()
+    };
+    let mut runtime = codex_runtime(root, false, false);
+
+    runtime.reconcile(&mut api).unwrap();
+    assert!(api.reports.is_empty());
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&rollout)
+        .unwrap()
+        .write_all(b"{\"type\":\"future_unrelated\"}\n")
+        .unwrap();
+    runtime.reconcile(&mut api).unwrap();
+
+    assert_eq!(api.reports.len(), 1);
+    assert_eq!(api.reports[0].agent, "codex");
+    assert_eq!(api.reports[0].applies_to_source, None);
+    assert_eq!(
+        api.reports[0].session_name.as_deref(),
+        Some("Fallback task")
+    );
+}
+
+#[test]
+fn codex_runtime_retains_activity_only_for_the_same_session_generation() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("codex/sessions");
+    let first_id = "30000000-0000-4000-8000-000000000001";
+    let second_id = "30000000-0000-4000-8000-000000000002";
+    let first = write_codex_rollout(
+        &root,
+        first_id,
+        "/synthetic/codex",
+        "First task",
+        &[("Old answer", Some("final_answer"))],
+    );
+    let second = write_codex_rollout(&root, second_id, "/synthetic/codex", "Second task", &[]);
+    let mut api = FakeApi {
+        agents: vec![codex_agent("/synthetic/codex", "w1:p1")],
+        process_args: HashMap::from([(
+            "w1:p1".into(),
+            vec!["codex".into(), "resume".into(), first_id.into()],
+        )]),
+        ..fake_api()
+    };
+    let mut runtime = codex_runtime(root.clone(), false, false);
+
+    runtime.reconcile(&mut api).unwrap();
+    fs::write(
+        &first,
+        codex_rollout_text(
+            first_id,
+            "/synthetic/codex",
+            "First task",
+            &[("Old answer", Some("final_answer")), ("Next task", None)],
+        ),
+    )
+    .unwrap();
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(api.reports[1].last_message.as_deref(), Some("Old answer"));
+
+    fs::write(
+        &first,
+        codex_rollout_text(
+            first_id,
+            "/synthetic/codex",
+            "First task",
+            &[
+                ("Old answer", Some("final_answer")),
+                ("Next task", None),
+                ("Working", Some("commentary")),
+                ("New answer", Some("final_answer")),
+            ],
+        ),
+    )
+    .unwrap();
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(api.reports[2].last_message.as_deref(), Some("New answer"));
+
+    let moved_day = root.join("2026/08/29");
+    fs::create_dir_all(&moved_day).unwrap();
+    let moved = moved_day.join(first.file_name().unwrap());
+    fs::rename(&first, &moved).unwrap();
+    fs::write(
+        &moved,
+        codex_rollout_text(
+            first_id,
+            "/synthetic/codex",
+            "First task",
+            &[
+                ("Old answer", Some("final_answer")),
+                ("Binding changed", None),
+            ],
+        ),
+    )
+    .unwrap();
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(api.reports.last().unwrap().last_message, None);
+
+    fs::write(
+        &moved,
+        codex_rollout_text(
+            first_id,
+            "/synthetic/codex",
+            "First task",
+            &[("Binding answer", Some("final_answer"))],
+        ),
+    )
+    .unwrap();
+    runtime.reconcile(&mut api).unwrap();
+    api.agents[0].terminal_id = "replacement-terminal".into();
+    fs::write(
+        &moved,
+        codex_rollout_text(
+            first_id,
+            "/synthetic/codex",
+            "First task",
+            &[
+                ("Binding answer", Some("final_answer")),
+                ("Another task", None),
+            ],
+        ),
+    )
+    .unwrap();
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(api.reports.last().unwrap().last_message, None);
+
+    api.process_args.insert(
+        "w1:p1".into(),
+        vec!["codex".into(), "resume".into(), second_id.into()],
+    );
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(
+        api.reports.last().unwrap().session_name.as_deref(),
+        Some("Second task")
+    );
+    assert_eq!(api.reports.last().unwrap().last_message, None);
+
+    fs::write(
+        &second,
+        codex_rollout_text(
+            second_id,
+            "/synthetic/codex",
+            "Second task",
+            &[("Second answer", Some("final_answer"))],
+        ),
+    )
+    .unwrap();
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(
+        api.reports.last().unwrap().last_message.as_deref(),
+        Some("Second answer")
+    );
+    api.agents[0].agent = Some("unknown".into());
+    runtime.reconcile(&mut api).unwrap();
+    api.agents[0].agent = Some("codex".into());
+    fs::write(
+        &second,
+        codex_rollout_text(
+            second_id,
+            "/synthetic/codex",
+            "Second task",
+            &[("Again", None)],
+        ),
+    )
+    .unwrap();
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(api.reports.last().unwrap().last_message, None);
+}
+
+#[test]
+fn codex_unresolved_new_identity_clears_old_metadata_and_retries_for_official_and_exact() {
+    for authority in ["official", "exact"] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("codex/sessions");
+        let first_id = "31000000-0000-4000-8000-000000000001";
+        let second_id = "31000000-0000-4000-8000-000000000002";
+        write_codex_rollout(
+            &root,
+            first_id,
+            "/synthetic/codex",
+            "First task",
+            &[("First answer", Some("final_answer"))],
+        );
+        let mut pane = codex_agent("/synthetic/codex", "w1:p1");
+        if authority == "official" {
+            pane.agent_session = Some(AgentSessionInfo {
+                source: "herdr:codex".into(),
+                agent: "codex".into(),
+                kind: "id".into(),
+                value: first_id.into(),
+            });
+        }
+        let initial_args = if authority == "exact" {
+            vec!["codex".into(), "resume".into(), first_id.into()]
+        } else {
+            vec!["codex".into()]
+        };
+        let mut api = FakeApi {
+            agents: vec![pane],
+            process_args: HashMap::from([("w1:p1".into(), initial_args)]),
+            ..fake_api()
+        };
+        let mut runtime = codex_runtime(root.clone(), false, false);
+
+        runtime.reconcile(&mut api).unwrap();
+        assert_eq!(api.reports.len(), 1, "authority: {authority}");
+        assert_eq!(api.reports[0].last_message.as_deref(), Some("First answer"));
+
+        if authority == "official" {
+            api.agents[0].agent_session.as_mut().unwrap().value = second_id.into();
+        } else {
+            api.process_args.insert(
+                "w1:p1".into(),
+                vec!["codex".into(), "resume".into(), second_id.into()],
+            );
+        }
+        api.fail_next_clear = true;
+        assert!(
+            runtime.reconcile(&mut api).is_err(),
+            "authority: {authority}"
+        );
+        assert_eq!(api.reports.len(), 1, "authority: {authority}");
+
+        runtime.reconcile(&mut api).unwrap();
+        assert_eq!(api.reports.len(), 2, "authority: {authority}");
+        assert_eq!(api.reports[1].session_name, None);
+        assert_eq!(api.reports[1].last_message, None);
+
+        write_codex_rollout(&root, second_id, "/synthetic/codex", "Second task", &[]);
+        runtime.reconcile(&mut api).unwrap();
+        assert_eq!(api.reports.len(), 3, "authority: {authority}");
+        assert_eq!(api.reports[2].session_name.as_deref(), Some("Second task"));
+        assert_eq!(api.reports[2].last_message, None);
+    }
+}
+
+#[test]
+fn codex_mixed_tab_layout_uses_order_and_restores_manual_baseline_when_unbound() {
+    let temp = tempfile::tempdir().unwrap();
+    let pi_root = temp.path().join("pi");
+    let claude_root = temp.path().join("claude");
+    let claude_project = claude_root.join("-synthetic-claude");
+    let codex_root = temp.path().join("codex/sessions");
+    let state = temp.path().join("state");
+    fs::create_dir_all(&pi_root).unwrap();
+    fs::create_dir_all(&claude_project).unwrap();
+    fs::create_dir_all(&state).unwrap();
+    fs::write(
+        pi_root.join("session.jsonl"),
+        pi_session_text("/synthetic/pi", "Pi", "Pi answer"),
+    )
+    .unwrap();
+    let claude_id = "35000000-0000-4000-8000-000000000001";
+    fs::write(
+        claude_project.join(format!("{claude_id}.jsonl")),
+        claude_session_text(claude_id, "/synthetic/claude", "Claude", "Answer"),
+    )
+    .unwrap();
+    let codex_id = "35000000-0000-4000-8000-000000000002";
+    let codex_rollout = write_codex_rollout(
+        &codex_root,
+        codex_id,
+        "/synthetic/codex",
+        "Codex",
+        &[("Answer", Some("final_answer"))],
+    );
+    let agents = vec![
+        supported_agent("pi", "/synthetic/pi", "w1:p1"),
+        claude_agent("/synthetic/claude", "w1:p2"),
+        codex_agent("/synthetic/codex", "w1:p3"),
+    ];
+    let mut api = FakeApi {
+        agents,
+        process_args: HashMap::from([
+            ("w1:p1".into(), vec!["pi".into()]),
+            (
+                "w1:p2".into(),
+                vec!["claude".into(), "--session-id".into(), claude_id.into()],
+            ),
+            (
+                "w1:p3".into(),
+                vec!["codex".into(), "resume".into(), codex_id.into()],
+            ),
+        ]),
+        snapshot: SessionSnapshot {
+            tabs: vec![TabInfo {
+                tab_id: "w1:t1".into(),
+                workspace_id: "w1".into(),
+                number: 1,
+                label: "manual baseline".into(),
+            }],
+            layouts: vec![TabLayout {
+                workspace_id: "w1".into(),
+                tab_id: "w1:t1".into(),
+                focused_pane_id: "w1:p1".into(),
+                panes: vec![
+                    layout_pane("w1:p1", 0, 20),
+                    layout_pane("w1:p3", 0, 10),
+                    layout_pane("w1:p2", 0, 0),
+                ],
+            }],
+            panes: vec![
+                snapshot_pane("w1:p1", "w1", "w1:t1"),
+                snapshot_pane("w1:p2", "w1", "w1:t1"),
+                snapshot_pane("w1:p3", "w1", "w1:t1"),
+            ],
+        },
+        ..fake_api()
+    };
+    let mut runtime = Runtime::new(
+        Config {
+            pi_session_dirs: vec![pi_root],
+            claude_session_dirs: vec![claude_root],
+            codex_session_dirs: vec![codex_root.clone()],
+            tab_name: herdr_agent_context::config::TabNameConfig { enabled: true },
+            ..Config::default()
+        },
+        PathBuf::from("/no-home"),
+        HashMap::new(),
+    );
+    runtime
+        .initialize_tab_names(&state, Path::new("/tmp/herdr-codex-mixed-layout.sock"))
+        .unwrap();
+
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(api.renames.last().unwrap().1, "Claude + Codex + Pi");
+
+    api.agents.retain(|agent| agent.pane_id == "w1:p3");
+    api.agents[0].terminal_id = "replacement-terminal".into();
+    api.snapshot.panes.retain(|pane| pane.pane_id == "w1:p3");
+    api.snapshot.panes[0].terminal_id = "replacement-terminal".into();
+    api.snapshot.layouts[0].panes = vec![layout_pane("w1:p3", 0, 0)];
+    api.process_args
+        .insert("w1:p3".into(), vec!["codex".into()]);
+    write_codex_rollout(
+        &codex_root,
+        "35000000-0000-4000-8000-000000000003",
+        "/synthetic/codex",
+        "Other",
+        &[],
+    );
+    runtime.reconcile(&mut api).unwrap();
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&codex_rollout)
+        .unwrap()
+        .write_all(b"{\"type\":\"future_unrelated\"}\n")
+        .unwrap();
+    let other = codex_root
+        .join("2026/08/28")
+        .join("rollout-2026-08-28T00-00-00-35000000-0000-4000-8000-000000000003.jsonl");
+    fs::OpenOptions::new()
+        .append(true)
+        .open(other)
+        .unwrap()
+        .write_all(b"{\"type\":\"future_unrelated\"}\n")
+        .unwrap();
+    runtime.reconcile(&mut api).unwrap();
+
+    assert_eq!(api.renames.last().unwrap().1, "manual baseline");
+}
+
+#[test]
+fn codex_index_updates_refresh_sidebar_tab_and_pane_names() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("codex/sessions");
+    let state = temp.path().join("state");
+    fs::create_dir_all(&state).unwrap();
+    let id = "40000000-0000-4000-8000-000000000001";
+    write_codex_rollout(
+        &root,
+        id,
+        "/synthetic/codex",
+        "Fallback task",
+        &[("Activity", Some("final_answer"))],
+    );
+    let index = root.parent().unwrap().join("session_index.jsonl");
+    fs::write(
+        &index,
+        format!("{{\"id\":\"{id}\",\"thread_name\":\"First title\"}}\n"),
+    )
+    .unwrap();
+    let mut api = single_pi_tab_api("tab baseline");
+    api.agents = vec![codex_agent("/synthetic/codex", "w1:p1")];
+    api.process_args.insert(
+        "w1:p1".into(),
+        vec!["codex".into(), "resume".into(), id.into()],
+    );
+    api.snapshot.panes[0].label = Some("pane baseline".into());
+    let mut runtime = codex_runtime(root, true, true);
+    let socket = Path::new("/tmp/herdr-codex-index-naming.sock");
+    runtime.initialize_tab_names(&state, socket).unwrap();
+    runtime.initialize_pane_names(&state, socket).unwrap();
+
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(
+        api.reports.last().unwrap().session_name.as_deref(),
+        Some("First title")
+    );
+    assert_eq!(api.renames.last().unwrap().1, "First title");
+    assert_eq!(
+        api.pane_renames.last().unwrap().1.as_deref(),
+        Some("First title")
+    );
+
+    fs::write(
+        &index,
+        format!(
+            "{{\"id\":\"{id}\",\"thread_name\":\"First title\"}}\n{{\"id\":\"{id}\",\"thread_name\":\"Renamed title\"}}\n"
+        ),
+    )
+    .unwrap();
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(
+        api.reports.last().unwrap().session_name.as_deref(),
+        Some("Renamed title")
+    );
+    assert_eq!(api.renames.last().unwrap().1, "Renamed title");
+    assert_eq!(
+        api.pane_renames.last().unwrap().1.as_deref(),
+        Some("Renamed title")
+    );
+
+    fs::write(
+        &index,
+        format!("{{\"id\":\"{id}\",\"thread_name\":\"Renamed title\"}}\n{{"),
+    )
+    .unwrap();
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(api.reports.len(), 3);
+    assert_eq!(
+        api.reports.last().unwrap().session_name.as_deref(),
+        Some("Renamed title")
+    );
+    assert_eq!(
+        api.reports.last().unwrap().last_message.as_deref(),
+        Some("Activity")
+    );
+
+    fs::write(
+        &index,
+        format!("{{\"id\":\"{id}\",\"thread_name\":\"Renamed title\"}}\nmalformed\n"),
+    )
+    .unwrap();
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(api.reports.len(), 4);
+    assert_eq!(
+        api.reports.last().unwrap().session_name.as_deref(),
+        Some("Fallback task")
+    );
+    assert_eq!(
+        api.reports.last().unwrap().last_message.as_deref(),
+        Some("Activity")
+    );
+    assert_eq!(api.renames.last().unwrap().1, "Fallback task");
+    assert_eq!(
+        api.pane_renames.last().unwrap().1.as_deref(),
+        Some("Fallback task")
+    );
+    assert!(
+        api.reports
+            .windows(2)
+            .all(|reports| reports[1].seq > reports[0].seq)
+    );
+}
+
+#[test]
+fn codex_sidebar_and_shared_naming_bounds_remain_unchanged() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("codex/sessions");
+    let state = temp.path().join("state");
+    fs::create_dir_all(&state).unwrap();
+    let id = "45000000-0000-4000-8000-000000000001";
+    let exact_name = "名".repeat(80);
+    let exact_message = "答".repeat(80);
+    let rollout = write_codex_rollout(
+        &root,
+        id,
+        "/synthetic/codex",
+        &exact_name,
+        &[(exact_message.as_str(), Some("final_answer"))],
+    );
+    let mut api = single_pi_tab_api("baseline");
+    api.agents = vec![codex_agent("/synthetic/codex", "w1:p1")];
+    api.process_args.insert(
+        "w1:p1".into(),
+        vec!["codex".into(), "resume".into(), id.into()],
+    );
+    let mut runtime = codex_runtime(root, true, true);
+    let socket = Path::new("/tmp/herdr-codex-bounds.sock");
+    runtime.initialize_tab_names(&state, socket).unwrap();
+    runtime.initialize_pane_names(&state, socket).unwrap();
+
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(
+        api.reports[0].session_name.as_deref(),
+        Some(exact_name.as_str())
+    );
+    assert_eq!(
+        api.reports[0].last_message.as_deref(),
+        Some(exact_message.as_str())
+    );
+    let bounded_name = format!("{}…", "名".repeat(9));
+    assert_eq!(api.renames.last().unwrap().1, bounded_name);
+    assert_eq!(
+        api.pane_renames.last().unwrap().1.as_deref(),
+        Some(bounded_name.as_str())
+    );
+
+    let over_name = "名".repeat(81);
+    let over_message = "答".repeat(81);
+    fs::write(
+        rollout,
+        codex_rollout_text(
+            id,
+            "/synthetic/codex",
+            &over_name,
+            &[(over_message.as_str(), Some("final_answer"))],
+        ),
+    )
+    .unwrap();
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(
+        api.reports.last().unwrap().session_name.as_deref(),
+        Some(format!("{}…", "名".repeat(79)).as_str())
+    );
+    assert_eq!(
+        api.reports.last().unwrap().last_message.as_deref(),
+        Some(format!("{}…", "答".repeat(79)).as_str())
+    );
+}
+
+#[test]
+fn codex_retryable_failure_skips_ttl_refresh_without_blocking_pi_and_recovers() {
+    let temp = tempfile::tempdir().unwrap();
+    let pi_root = temp.path().join("pi");
+    let codex_root = temp.path().join("codex/sessions");
+    fs::create_dir_all(&pi_root).unwrap();
+    fs::write(
+        pi_root.join("session.jsonl"),
+        pi_session_text("/synthetic/pi", "Pi task", "Pi answer"),
+    )
+    .unwrap();
+    let id = "50000000-0000-4000-8000-000000000001";
+    let rollout = write_codex_rollout(
+        &codex_root,
+        id,
+        "/synthetic/codex",
+        "Codex task",
+        &[("Codex answer", Some("final_answer"))],
+    );
+    let valid = fs::read_to_string(&rollout).unwrap();
+    let mut api = FakeApi {
+        agents: vec![
+            supported_agent("pi", "/synthetic/pi", "w1:p1"),
+            codex_agent("/synthetic/codex", "w1:p2"),
+        ],
+        process_args: HashMap::from([
+            ("w1:p1".into(), vec!["pi".into()]),
+            (
+                "w1:p2".into(),
+                vec!["codex".into(), "resume".into(), id.into()],
+            ),
+        ]),
+        ..fake_api()
+    };
+    let mut runtime = Runtime::new(
+        Config {
+            pi_session_dirs: vec![pi_root],
+            codex_session_dirs: vec![codex_root],
+            ..Config::default()
+        },
+        PathBuf::from("/no-home"),
+        HashMap::new(),
+    );
+
+    runtime.reconcile(&mut api).unwrap();
+    fs::write(&rollout, format!("{valid}{{")).unwrap();
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(
+        api.reports
+            .iter()
+            .filter(|report| report.agent == "pi")
+            .count(),
+        2
+    );
+    assert_eq!(
+        api.reports
+            .iter()
+            .filter(|report| report.agent == "codex")
+            .count(),
+        1
+    );
+
+    fs::write(
+        &rollout,
+        codex_rollout_text(
+            id,
+            "/synthetic/codex",
+            "Codex task",
+            &[("Recovered", Some("commentary"))],
+        ),
+    )
+    .unwrap();
+    runtime.reconcile(&mut api).unwrap();
+    let codex_reports: Vec<_> = api
+        .reports
+        .iter()
+        .filter(|report| report.agent == "codex")
+        .collect();
+    assert_eq!(codex_reports.len(), 2);
+    assert_eq!(codex_reports[1].last_message.as_deref(), Some("Recovered"));
+}
+
+#[test]
+fn codex_completed_structural_error_does_not_refresh_ttl_and_recovers() {
+    for authority in ["official", "exact"] {
+        let temp = tempfile::tempdir().unwrap();
+        let pi_root = temp.path().join("pi");
+        let codex_root = temp.path().join("codex/sessions");
+        fs::create_dir_all(&pi_root).unwrap();
+        fs::write(
+            pi_root.join("session.jsonl"),
+            pi_session_text("/synthetic/pi", "Pi task", "Pi answer"),
+        )
+        .unwrap();
+        let id = "52000000-0000-4000-8000-000000000001";
+        let rollout = write_codex_rollout(
+            &codex_root,
+            id,
+            "/synthetic/codex",
+            "Codex task",
+            &[("Codex answer", Some("final_answer"))],
+        );
+        let mut codex = codex_agent("/synthetic/codex", "w1:p2");
+        if authority == "official" {
+            codex.agent_session = Some(AgentSessionInfo {
+                source: "herdr:codex".into(),
+                agent: "codex".into(),
+                kind: "id".into(),
+                value: id.into(),
+            });
+        }
+        let codex_args = if authority == "exact" {
+            vec!["codex".into(), "resume".into(), id.into()]
+        } else {
+            vec!["codex".into()]
+        };
+        let mut api = FakeApi {
+            agents: vec![supported_agent("pi", "/synthetic/pi", "w1:p1"), codex],
+            process_args: HashMap::from([
+                ("w1:p1".into(), vec!["pi".into()]),
+                ("w1:p2".into(), codex_args),
+            ]),
+            ..fake_api()
+        };
+        let mut runtime = Runtime::new(
+            Config {
+                pi_session_dirs: vec![pi_root],
+                codex_session_dirs: vec![codex_root],
+                ..Config::default()
+            },
+            PathBuf::from("/no-home"),
+            HashMap::new(),
+        );
+
+        runtime.reconcile(&mut api).unwrap();
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap()
+            .write_all(b"{}\n")
+            .unwrap();
+        runtime.reconcile(&mut api).unwrap();
+        assert_eq!(
+            api.reports
+                .iter()
+                .filter(|report| report.agent == "pi")
+                .count(),
+            2,
+            "authority: {authority}"
+        );
+        assert_eq!(
+            api.reports
+                .iter()
+                .filter(|report| report.agent == "codex")
+                .count(),
+            1,
+            "authority: {authority}"
+        );
+
+        fs::write(
+            &rollout,
+            codex_rollout_text(
+                id,
+                "/synthetic/codex",
+                "Codex task",
+                &[("Recovered", Some("commentary"))],
+            ),
+        )
+        .unwrap();
+        runtime.reconcile(&mut api).unwrap();
+        let codex_reports: Vec<_> = api
+            .reports
+            .iter()
+            .filter(|report| report.agent == "codex")
+            .collect();
+        assert_eq!(codex_reports.len(), 2, "authority: {authority}");
+        assert_eq!(codex_reports[1].last_message.as_deref(), Some("Recovered"));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn codex_unreadable_rollout_does_not_refresh_and_recovers() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("codex/sessions");
+    let id = "54000000-0000-4000-8000-000000000001";
+    let rollout = write_codex_rollout(
+        &root,
+        id,
+        "/synthetic/codex",
+        "Task",
+        &[("Answer", Some("final_answer"))],
+    );
+    let mut api = FakeApi {
+        agents: vec![codex_agent("/synthetic/codex", "w1:p1")],
+        process_args: HashMap::from([(
+            "w1:p1".into(),
+            vec!["codex".into(), "resume".into(), id.into()],
+        )]),
+        ..fake_api()
+    };
+    let mut runtime = codex_runtime(root, false, false);
+    runtime.reconcile(&mut api).unwrap();
+
+    fs::set_permissions(&rollout, fs::Permissions::from_mode(0o000)).unwrap();
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(api.reports.len(), 1);
+    fs::set_permissions(&rollout, fs::Permissions::from_mode(0o600)).unwrap();
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(api.reports.len(), 2);
+}
+
+#[test]
+fn codex_pane_manual_override_follows_session_id_across_rollout_path_change() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("codex/sessions");
+    let state = temp.path().join("state");
+    fs::create_dir_all(&state).unwrap();
+    let id = "55000000-0000-4000-8000-000000000001";
+    let second_id = "55000000-0000-4000-8000-000000000002";
+    let rollout = write_codex_rollout(
+        &root,
+        id,
+        "/synthetic/codex",
+        "Codex title",
+        &[("Answer", Some("final_answer"))],
+    );
+    write_codex_rollout(
+        &root,
+        second_id,
+        "/synthetic/codex",
+        "Second title",
+        &[("Second answer", Some("final_answer"))],
+    );
+    let mut api = single_pi_tab_api("baseline");
+    api.agents = vec![codex_agent("/synthetic/codex", "w1:p1")];
+    api.process_args.insert(
+        "w1:p1".into(),
+        vec!["codex".into(), "resume".into(), id.into()],
+    );
+    api.snapshot.panes[0].label = Some("pane baseline".into());
+    let mut runtime = codex_runtime(root.clone(), false, true);
+    runtime
+        .initialize_pane_names(&state, Path::new("/tmp/herdr-codex-pane-session-id.sock"))
+        .unwrap();
+
+    runtime.reconcile(&mut api).unwrap();
+    api.snapshot.panes[0].label = Some("manual codex".into());
+    runtime.reconcile(&mut api).unwrap();
+    api.process_args.insert(
+        "w1:p1".into(),
+        vec!["codex".into(), "resume".into(), second_id.into()],
+    );
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(api.snapshot.panes[0].label.as_deref(), Some("Second title"));
+
+    let moved_day = root.join("2026/08/29");
+    fs::create_dir_all(&moved_day).unwrap();
+    fs::rename(&rollout, moved_day.join(rollout.file_name().unwrap())).unwrap();
+    api.process_args.insert(
+        "w1:p1".into(),
+        vec!["codex".into(), "resume".into(), id.into()],
+    );
+    runtime.reconcile(&mut api).unwrap();
+
+    assert_eq!(api.snapshot.panes[0].label.as_deref(), Some("manual codex"));
+}
+
+#[test]
+fn codex_tab_ownership_survives_restart_after_same_session_path_change() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("codex/sessions");
+    let state = temp.path().join("state");
+    fs::create_dir_all(&state).unwrap();
+    let id = "56000000-0000-4000-8000-000000000001";
+    let rollout = write_codex_rollout(
+        &root,
+        id,
+        "/synthetic/codex",
+        "Codex title",
+        &[("Answer", Some("final_answer"))],
+    );
+    let mut api = single_pi_tab_api("baseline");
+    api.agents = vec![codex_agent("/synthetic/codex", "w1:p1")];
+    api.process_args.insert(
+        "w1:p1".into(),
+        vec!["codex".into(), "resume".into(), id.into()],
+    );
+    let socket = Path::new("/tmp/herdr-codex-tab-session-id.sock");
+    let mut runtime = codex_runtime(root.clone(), true, false);
+    runtime.initialize_tab_names(&state, socket).unwrap();
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(api.renames, vec![("w1:t1".into(), "Codex title".into())]);
+    drop(runtime);
+
+    let moved_day = root.join("2026/08/29");
+    fs::create_dir_all(&moved_day).unwrap();
+    fs::rename(&rollout, moved_day.join(rollout.file_name().unwrap())).unwrap();
+    let mut restarted = codex_runtime(root, true, false);
+    restarted.initialize_tab_names(&state, socket).unwrap();
+    restarted.reconcile(&mut api).unwrap();
+
+    assert_eq!(api.renames, vec![("w1:t1".into(), "Codex title".into())]);
+}
+
+#[test]
+fn codex_excluded_process_clear_failure_is_retried() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("codex/sessions");
+    let id = "60000000-0000-4000-8000-000000000001";
+    write_codex_rollout(
+        &root,
+        id,
+        "/synthetic/codex",
+        "Task",
+        &[("Answer", Some("final_answer"))],
+    );
+    let mut api = FakeApi {
+        agents: vec![codex_agent("/synthetic/codex", "w1:p1")],
+        process_args: HashMap::from([(
+            "w1:p1".into(),
+            vec!["codex".into(), "resume".into(), id.into()],
+        )]),
+        ..fake_api()
+    };
+    let mut runtime = codex_runtime(root, false, false);
+    runtime.reconcile(&mut api).unwrap();
+
+    api.process_args
+        .insert("w1:p1".into(), vec!["codex".into(), "exec".into()]);
+    api.fail_next_clear = true;
+    assert!(runtime.reconcile(&mut api).is_err());
+    assert_eq!(api.reports.len(), 1);
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(api.reports.len(), 2);
+    assert_eq!(api.reports[1].agent, "codex");
+    assert_eq!(api.reports[1].session_name, None);
+    assert_eq!(api.reports[1].last_message, None);
 }
 
 #[test]

@@ -43,6 +43,7 @@ fn run() -> Result<(), String> {
             key == "PI_CODING_AGENT_SESSION_DIR"
                 || key == "PI_CODING_AGENT_DIR"
                 || key == "CLAUDE_CONFIG_DIR"
+                || key == "CODEX_HOME"
         })
         .collect();
     let mut watcher = env::var_os("HERDR_PLUGIN_CONFIG_DIR")

@@ -1,6 +1,6 @@
 use crate::backend::{
-    BackendOutcome, BackendRegistry, Binding, CLAUDE_AGENT, DisplayView, PaneInput, PaneKey,
-    ProcessCommand, SessionReference,
+    BackendOutcome, BackendRegistry, Binding, CLAUDE_AGENT, CODEX_AGENT, DisplayView, PaneInput,
+    PaneKey, ProcessCommand, SessionReference,
 };
 use crate::config::Config;
 use crate::herdr::protocol::{SessionSnapshot, SnapshotPane, TabLayout};
@@ -238,11 +238,17 @@ impl Runtime {
                     binding,
                     view,
                 }) => self.report_view(api, pane, agent, binding, view.clone())?,
-                Some(
-                    BackendOutcome::Failed
-                    | BackendOutcome::FailedBinding { .. }
-                    | BackendOutcome::FailedIdentity { .. },
-                ) => {
+                Some(BackendOutcome::FailedIdentity {
+                    agent,
+                    session_identity,
+                }) => {
+                    self.clear_if_failed_identity_changed(api, pane, agent, session_identity)?;
+                    let binding = self.backends.authoritative_binding(&pane.key).cloned();
+                    if let Some(binding) = binding {
+                        self.clear_if_binding_changed(api, pane, &binding)?;
+                    }
+                }
+                Some(BackendOutcome::Failed | BackendOutcome::FailedBinding { .. }) => {
                     let binding = self.backends.authoritative_binding(&pane.key).cloned();
                     if let Some(binding) = binding {
                         self.clear_if_binding_changed(api, pane, &binding)?;
@@ -629,6 +635,24 @@ impl Runtime {
         Ok(())
     }
 
+    fn clear_if_failed_identity_changed<A: HerdrApi>(
+        &mut self,
+        api: &mut A,
+        pane: &PaneInput,
+        agent: &str,
+        session_identity: &str,
+    ) -> Result<(), A::Error> {
+        let changed = self.panes.get(&pane.key.pane_id).is_some_and(|state| {
+            state.reported
+                && state.terminal_id == pane.key.terminal_id
+                && (state.agent != agent || state.session_identity != session_identity)
+        });
+        if changed {
+            self.clear_if_reported(api, &pane.key.pane_id)?;
+        }
+        Ok(())
+    }
+
     fn clear_if_binding_changed<A: HerdrApi>(
         &mut self,
         api: &mut A,
@@ -809,7 +833,7 @@ fn contributor_binding_identity(
     binding: &Binding,
     session_identity: Option<&str>,
 ) -> Vec<u8> {
-    if agent.eq_ignore_ascii_case(CLAUDE_AGENT)
+    if (agent.eq_ignore_ascii_case(CLAUDE_AGENT) || agent.eq_ignore_ascii_case(CODEX_AGENT))
         && let Some(session_identity) = session_identity
     {
         return session_identity.as_bytes().to_vec();
@@ -873,5 +897,22 @@ mod tests {
         let mut snapshot = naming_snapshot();
         snapshot.panes[0].tab_id = "w1:other".into();
         assert!(validate_naming_snapshot(&snapshot).is_none());
+    }
+
+    #[test]
+    fn codex_naming_contributor_uses_session_identity() {
+        let binding = Binding {
+            path: PathBuf::from("/synthetic/codex/rollout.jsonl"),
+            evidence: crate::backend::BindingEvidence::ExactIdentityHint,
+        };
+
+        assert_eq!(
+            contributor_binding_identity(
+                CODEX_AGENT,
+                &binding,
+                Some("70000000-0000-4000-8000-000000000001")
+            ),
+            b"70000000-0000-4000-8000-000000000001"
+        );
     }
 }
