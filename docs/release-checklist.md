@@ -14,9 +14,9 @@ Run this checklist from a clean checkout before promoting the `v0.4.0` prereleas
 - [x] `shellcheck scripts/*.sh tests/*.sh`
 - [x] `actionlint .github/workflows/*.yml`
 - [x] `git diff --check`
-- [ ] The nonpublishing CI quality job and all four target jobs passed for the proposed release SHA.
-- [ ] Downloaded CI archives passed `scripts/verify-release-assets.sh 0.4.0 <dist>`.
-- [ ] Both Linux archives passed `scripts/verify-glibc-baseline.sh <binary> 2.18`.
+- [x] The nonpublishing CI quality job and all four target jobs passed for the proposed release SHA.
+- [x] Downloaded CI archives passed `scripts/verify-release-assets.sh 0.4.0 <dist>`.
+- [x] Both Linux archives passed `scripts/verify-glibc-baseline.sh <binary> 2.18`.
 
 ## Evidence and source plugin setup
 
@@ -160,7 +160,7 @@ herdr agent prompt context_codex "Reply with a short synthetic Codex status." --
 
 Keep the default-off check separate from the opt-in checks. For the opt-in smoke, back up the plugin's `config.toml`, enable `[tab_name]` and `[pane_name]` independently and together, then restore the exact original file before cleanup. Use only the disposable named session and synthetic agents created above. If the live smoke is not applicable, leave its boxes unchecked and record the reason; automated coverage does not count as an executed live check.
 
-Current v0.4.0 review status: live source and integration smoke will not run because named sessions share the global Herdr plugin registry, and replacing it with the unreleased build would mutate the active user's plugin state. The user explicitly accepted this residual risk on 2026-08-30; automated and exact-SHA distribution coverage do not count as live smoke.
+Current v0.4.0 review status: live source and integration smoke was not run because named sessions share the global Herdr plugin registry, and replacing it with the unreleased build would mutate the active user's plugin state. Promotion proceeded after explicit user acceptance of this residual risk on 2026-08-30; automated and exact-SHA distribution coverage do not count as live smoke.
 
 - [ ] With both naming tables omitted, the listener sends no `session.snapshot`, `tab.rename`, or `pane.rename` request and naming-only events do not refresh metadata.
 - [ ] Generated components use the Pi or Codex name or verified Claude title, preserve grapheme clusters, and occupy at most 20 terminal columns; the aggregate retains every component joined with ` + `.
@@ -315,10 +315,10 @@ trap - EXIT HUP INT TERM
 
 ## Cleanup and promotion evidence
 
-- [ ] Temporary source validation cleanup completed before promotion (not applicable; live source validation was not run).
-- [ ] The verified managed v0.4.0 plugin is enabled after promotion.
-- [ ] No source listener, temporary integration, disposable pane, or named test session remains.
-- [ ] The repository is clean and `HEAD == origin/main` before exact-SHA CI validation.
+- [x] Temporary source validation cleanup completed before promotion (not applicable; live source validation was not run).
+- [x] The verified managed v0.4.0 plugin is enabled after promotion.
+- [x] No source listener, temporary integration, disposable pane, or named test session remains.
+- [x] The repository was clean and `HEAD == origin/main` before exact-SHA CI validation.
 
 Select the CI run by immutable SHA, flatten all target artifacts, generate their checksum manifest, and run the same release validators:
 
@@ -354,15 +354,15 @@ for target in aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu; do
 done
 ```
 
-- [ ] Record the exact SHA and CI run ID under `$AGENT_CONTEXT_EVIDENCE_DIR`.
-- [ ] All four downloaded CI archives pass checksum, content, executable, and Linux glibc `2.18` checks.
-- [ ] Independent implementation and distribution review has no unresolved finding.
+- [x] Record the exact SHA and CI run ID under `$AGENT_CONTEXT_EVIDENCE_DIR`.
+- [x] All four downloaded CI archives pass checksum, content, executable, and Linux glibc `2.18` checks.
+- [x] Independent implementation and distribution review has no unresolved finding.
 - [x] Obtain explicit promotion approval before creating or pushing `v0.4.0` (approved 2026-08-30).
-- [ ] After approval, tag CI and the Release workflow both pass for the recorded SHA.
-- [ ] The public prerelease contains four archives plus `SHA256SUMS`.
-- [ ] Public assets pass `scripts/verify-release-assets.sh 0.4.0`.
-- [ ] The public URL installer installs a host binary byte-identical to its archive.
-- [ ] Replace the managed v0.3.0 plugin with the verified managed v0.4.0 release.
+- [x] After approval, tag CI and the Release workflow both pass for the recorded SHA.
+- [x] The public prerelease contains four archives plus `SHA256SUMS`.
+- [x] Public assets pass `scripts/verify-release-assets.sh 0.4.0`.
+- [x] The public URL installer installs a host binary byte-identical to its archive.
+- [x] Replace the managed v0.3.0 plugin with the verified managed v0.4.0 release.
 
 ## v0.2.0 promotion record
 
@@ -389,3 +389,16 @@ done
 - Managed plugin: enabled `v0.3.0`, requested ref `v0.3.0`, resolved commit `d37c9dc4d60415b2f8edf0e0023b1b2f32b60d4e`; no duplicate listener was running after installation.
 - Integrations after promotion: Pi, Claude, and Codex `current (v8)`.
 - Independent review found no unresolved implementation or distribution defect. Live source and integration smoke was not run because Herdr's plugin registry is global; promotion proceeded after explicit acceptance of that residual risk.
+
+## v0.4.0 promotion record
+
+- Release SHA: `4d8daae4262a12a49b5d8094480daa17bb9a4f29`.
+- Exact-HEAD pre-release CI: `33281544682`; quality and all four target jobs passed.
+- Tag CI: `33281731261`; quality and all four target jobs passed.
+- Release workflow: `33281731259`; all four builds, asset validation, installer smoke, and prerelease publication passed.
+- Public prerelease: <https://github.com/ryonakae/herdr-agent-context/releases/tag/v0.4.0>.
+- Public assets: four target archives plus `SHA256SUMS`; archive contents, checksums, executable bits, and both Linux glibc `2.18` baselines passed.
+- Public installer host: `Darwin arm64`; asset `herdr-agent-context-v0.4.0-aarch64-apple-darwin.tar.gz`; installed, archived, and managed-plugin binary SHA-256 `dfad13887da907dc701a1460f7f9b20a95603814cd53065079ccf40643273ebc`.
+- Managed plugin: enabled `v0.4.0`, requested ref `v0.4.0`, resolved commit `4d8daae4262a12a49b5d8094480daa17bb9a4f29`; its installed binary is byte-identical to the public archive.
+- Integrations after promotion: Pi, Claude, and Codex `current (v8)`.
+- Independent implementation and release-candidate reviews found no unresolved blocking/high finding. Live source and integration smoke was not run because Herdr's plugin registry is global; promotion proceeded after explicit user acceptance of that residual risk.
