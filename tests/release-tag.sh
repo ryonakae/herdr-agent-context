@@ -45,7 +45,7 @@ expect_fail unknown-commit "$SCRIPT" v0.4.0 000000000000000000000000000000000000
 
 work=$(new_repository remote-main-advanced)
 peer="$TMP/remote-main-advanced-peer"
-git clone "$TMP/remote-main-advanced-remote.git" "$peer" >/dev/null
+git clone --branch main "$TMP/remote-main-advanced-remote.git" "$peer" >/dev/null
 git -C "$peer" config user.email release-test@example.invalid
 git -C "$peer" config user.name 'Release Test'
 printf 'remote advance\n' >"$peer/remote-advance"
