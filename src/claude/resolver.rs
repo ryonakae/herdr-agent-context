@@ -520,6 +520,7 @@ mod tests {
 
     fn command(args: &[&str]) -> ProcessCommand {
         ProcessCommand {
+            pid: 1,
             name: "claude".into(),
             argv: Some(args.iter().map(|value| (*value).to_owned()).collect()),
             argv0: Some("claude".into()),
@@ -744,6 +745,7 @@ mod tests {
             ClaudeCliState::Ineligible
         );
         let empty_argv = ProcessCommand {
+            pid: 1,
             name: "claude".into(),
             argv: Some(Vec::new()),
             argv0: Some("claude".into()),
@@ -755,6 +757,7 @@ mod tests {
     #[test]
     fn parses_fallback_cmdline_quotes_and_rejects_malformed_input() {
         let quoted = ProcessCommand {
+            pid: 1,
             name: "claude".into(),
             argv: None,
             argv0: Some("claude".into()),
@@ -773,6 +776,7 @@ mod tests {
             }
         );
         let malformed = ProcessCommand {
+            pid: 1,
             name: "claude".into(),
             argv: None,
             argv0: Some("claude".into()),

@@ -1,6 +1,7 @@
 use crate::claude::ClaudeBackend;
 use crate::codex::CodexBackend;
 use crate::config::Config;
+use crate::opencode::OpenCodeBackend;
 use crate::pi::PiBackend;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -8,6 +9,7 @@ use std::time::SystemTime;
 
 pub const CLAUDE_AGENT: &str = "claude";
 pub const CODEX_AGENT: &str = "codex";
+pub const OPENCODE_AGENT: &str = "opencode";
 pub const PI_AGENT: &str = "pi";
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
@@ -26,6 +28,7 @@ pub struct SessionReference {
 
 #[derive(Clone, Eq, PartialEq)]
 pub struct ProcessCommand {
+    pub pid: u32,
     pub name: String,
     pub argv: Option<Vec<String>>,
     pub argv0: Option<String>,
@@ -121,6 +124,7 @@ pub struct BackendRegistry {
     pi: PiBackend,
     claude: ClaudeBackend,
     codex: CodexBackend,
+    opencode: OpenCodeBackend,
 }
 
 impl BackendRegistry {
@@ -129,6 +133,7 @@ impl BackendRegistry {
             agent.eq_ignore_ascii_case(PI_AGENT)
                 || agent.eq_ignore_ascii_case(CLAUDE_AGENT)
                 || agent.eq_ignore_ascii_case(CODEX_AGENT)
+                || agent.eq_ignore_ascii_case(OPENCODE_AGENT)
         })
     }
 
@@ -142,6 +147,7 @@ impl BackendRegistry {
         let mut outcomes = self.pi.reconcile(config, home, env, panes);
         outcomes.extend(self.claude.reconcile(config, home, env, panes));
         outcomes.extend(self.codex.reconcile(config, home, env, panes));
+        outcomes.extend(self.opencode.reconcile(config, home, env, panes));
         outcomes
     }
 
@@ -150,12 +156,14 @@ impl BackendRegistry {
             .binding(key)
             .or_else(|| self.claude.binding(key))
             .or_else(|| self.codex.binding(key))
+            .or_else(|| self.opencode.binding(key))
     }
 
     pub(crate) fn authoritative_binding(&self, key: &PaneKey) -> Option<&Binding> {
         self.pi
             .authoritative_binding(key)
             .or_else(|| self.codex.authoritative_binding(key))
+            .or_else(|| self.opencode.authoritative_binding(key))
     }
 }
 
@@ -194,6 +202,7 @@ mod tests {
             terminal_title: None,
             authoritative_session: None,
             processes: vec![ProcessCommand {
+                pid: 1,
                 name: "codex".into(),
                 argv: Some(vec!["codex".into(), "resume".into(), identity.into()]),
                 argv0: Some("codex".into()),
@@ -214,9 +223,72 @@ mod tests {
     }
 
     #[test]
-    fn registry_supports_only_the_three_static_agents() {
+    fn registry_dispatches_opencode_independently() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        fs::create_dir(&project).unwrap();
+        let database = temp.path().join("opencode.db");
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        connection
+            .execute_batch(
+                "
+                CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT NOT NULL, title TEXT NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, time_archived INTEGER);
+                CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL);
+                CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL);
+                ",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO session VALUES ('ses_registry', NULL, ?1, 'Registry', 1, 1, NULL)",
+                [project.to_str().unwrap()],
+            )
+            .unwrap();
+        drop(connection);
+        let pane = PaneInput {
+            key: PaneKey {
+                pane_id: "opencode-pane".into(),
+                terminal_id: "opencode-terminal".into(),
+            },
+            workspace_id: None,
+            tab_id: None,
+            agent: OPENCODE_AGENT.into(),
+            cwd: project,
+            terminal_title: None,
+            authoritative_session: None,
+            processes: vec![ProcessCommand {
+                pid: 42,
+                name: "opencode".into(),
+                argv: Some(vec![
+                    "opencode".into(),
+                    "--session".into(),
+                    "ses_registry".into(),
+                ]),
+                argv0: Some("opencode".into()),
+                cmdline: None,
+            }],
+        };
+        let env = HashMap::from([(
+            "OPENCODE_DB".into(),
+            database.to_string_lossy().into_owned(),
+        )]);
+
+        let outcomes = BackendRegistry::default().reconcile(
+            &Config::default(),
+            Path::new("/no-home"),
+            &env,
+            std::slice::from_ref(&pane),
+        );
+        assert!(matches!(
+            outcomes.get(&pane.key),
+            Some(BackendOutcome::Resolved { agent, .. }) if *agent == OPENCODE_AGENT
+        ));
+    }
+
+    #[test]
+    fn registry_supports_only_the_four_static_agents() {
         let registry = BackendRegistry::default();
-        for agent in ["pi", "claude", "codex", "CODEX"] {
+        for agent in ["pi", "claude", "codex", "CODEX", "opencode", "OPENCODE"] {
             assert!(registry.supports_agent(Some(agent)));
         }
         for agent in [None, Some(""), Some("unknown")] {

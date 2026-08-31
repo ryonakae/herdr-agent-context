@@ -5,6 +5,9 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+const ORDINARY_MAX_AGE_MILLIS: i64 = 30 * 24 * 60 * 60 * 1_000;
+const ORDINARY_MAX_CANDIDATES: usize = 25;
 use thiserror::Error;
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -16,7 +19,9 @@ pub struct RowFingerprint {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionFingerprint {
+    pub session_time_created: i64,
     pub session_time_updated: i64,
+    pub session_title: String,
     pub latest_message: Option<RowFingerprint>,
     pub latest_part: Option<RowFingerprint>,
 }
@@ -46,6 +51,7 @@ struct SessionRow {
     parent_id: Option<String>,
     directory: String,
     title: String,
+    time_created: i64,
     time_updated: i64,
 }
 
@@ -70,6 +76,101 @@ pub fn read_session(
     session_identity: &str,
     expected_cwd: &Path,
 ) -> Result<Option<OpenCodeSessionView>, OpenCodeSessionError> {
+    with_read_transaction(database_path, |transaction| {
+        validate_required_schema(transaction)?;
+        read_session_from_transaction(transaction, session_identity, expected_cwd)
+    })
+}
+
+pub fn scan_sessions(
+    database_path: &Path,
+    expected_cwd: &Path,
+    now_millis: i64,
+) -> Result<Vec<OpenCodeSessionView>, OpenCodeSessionError> {
+    let input_cwd = expected_cwd
+        .to_str()
+        .ok_or(OpenCodeSessionError::InvalidSession)?
+        .to_owned();
+    let expected_cwd =
+        normalized_absolute(expected_cwd).ok_or(OpenCodeSessionError::InvalidSession)?;
+    let canonical_cwd = expected_cwd
+        .to_str()
+        .ok_or(OpenCodeSessionError::InvalidSession)?
+        .to_owned();
+    with_read_transaction(database_path, |transaction| {
+        validate_required_schema(transaction)?;
+        let mut statement = transaction
+            .prepare(
+                "SELECT id, parent_id, directory, title, time_created, time_updated, time_archived
+                 FROM session
+                 WHERE parent_id IS NULL
+                   AND time_archived IS NULL
+                   AND time_updated >= ?1
+                   AND (directory = ?2 OR directory = ?3)
+                 ORDER BY time_updated DESC, id ASC
+                 LIMIT ?4",
+            )
+            .map_err(classify_sql_error)?;
+        let rows = statement
+            .query_map(
+                rusqlite::params![
+                    now_millis.saturating_sub(ORDINARY_MAX_AGE_MILLIS),
+                    input_cwd,
+                    canonical_cwd,
+                    ORDINARY_MAX_CANDIDATES as i64
+                ],
+                |row| {
+                    let id: String = row.get(0)?;
+                    let _: Option<String> = row.get(1)?;
+                    let directory: String = row.get(2)?;
+                    let _: String = row.get(3)?;
+                    let _: i64 = row.get(4)?;
+                    let _: i64 = row.get(5)?;
+                    let _: Option<i64> = row.get(6)?;
+                    Ok((id, directory))
+                },
+            )
+            .map_err(classify_sql_error)?;
+        let mut identities = Vec::new();
+        for row in rows {
+            let (identity, directory) = row.map_err(classify_sql_error)?;
+            if identity.trim().is_empty() {
+                return Err(OpenCodeSessionError::InvalidSession);
+            }
+            let Some(directory) = normalized_absolute(Path::new(&directory)) else {
+                return Err(OpenCodeSessionError::InvalidSession);
+            };
+            if directory == expected_cwd {
+                identities.push(identity);
+            }
+        }
+        drop(statement);
+
+        let mut sessions = Vec::with_capacity(identities.len());
+        for identity in identities {
+            let session = read_session_from_transaction(transaction, &identity, &expected_cwd)?
+                .ok_or(OpenCodeSessionError::InvalidSession)?;
+            sessions.push(session);
+        }
+        Ok(sessions)
+    })
+}
+
+fn validate_required_schema(transaction: &Transaction<'_>) -> Result<(), OpenCodeSessionError> {
+    for query in [
+        "SELECT id, parent_id, directory, title, time_created, time_updated, time_archived FROM session LIMIT 0",
+        "SELECT id, session_id, time_created, time_updated, data FROM message LIMIT 0",
+        "SELECT id, message_id, session_id, time_created, time_updated, data FROM part LIMIT 0",
+    ] {
+        transaction.prepare(query).map_err(classify_sql_error)?;
+    }
+    Ok(())
+}
+
+fn with_read_transaction<T>(
+    database_path: &Path,
+    read: impl FnOnce(&Transaction<'_>) -> Result<T, OpenCodeSessionError>,
+) -> Result<T, OpenCodeSessionError> {
     let mut connection = Connection::open_with_flags(
         database_path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -81,7 +182,7 @@ pub fn read_session(
     let transaction = connection
         .transaction()
         .map_err(|_| OpenCodeSessionError::Read)?;
-    let result = read_session_from_transaction(&transaction, session_identity, expected_cwd);
+    let result = read(&transaction);
     transaction
         .commit()
         .map_err(|_| OpenCodeSessionError::Read)?;
@@ -107,8 +208,8 @@ fn read_session_from_transaction(
                     parent_id: row.get(1)?,
                     directory: row.get(2)?,
                     title: row.get(3)?,
+                    time_created: row.get(4)?,
                     time_updated: {
-                        let _: i64 = row.get(4)?;
                         let _: Option<i64> = row.get(6)?;
                         row.get(5)?
                     },
@@ -215,7 +316,9 @@ fn read_session_from_transaction(
             last_message,
         },
         fingerprint: SessionFingerprint {
+            session_time_created: session.time_created,
             session_time_updated: session.time_updated,
+            session_title: session.title,
             latest_message,
             latest_part,
         },

@@ -325,6 +325,7 @@ mod tests {
             terminal_title: None,
             authoritative_session: None,
             processes: vec![ProcessCommand {
+                pid: 1,
                 name: "pi".into(),
                 argv: Some(vec!["pi".into()]),
                 argv0: Some("pi".into()),
@@ -478,6 +479,7 @@ mod tests {
         );
         let mut ephemeral = input.clone();
         ephemeral.processes = vec![ProcessCommand {
+            pid: 1,
             name: "sh".into(),
             argv: Some(vec!["sh".into(), "-lc".into(), "pi --no-session".into()]),
             argv0: Some("sh".into()),

@@ -332,6 +332,7 @@ mod tests {
             terminal_title: None,
             authoritative_session: None,
             processes: vec![ProcessCommand {
+                pid: 1,
                 name: "codex".into(),
                 argv: Some(vec!["codex".into()]),
                 argv0: Some("codex".into()),
@@ -704,6 +705,7 @@ mod tests {
         });
         official.processes[0].argv = Some(vec!["codex".into(), "resume".into(), FIRST_ID.into()]);
         official.processes.push(ProcessCommand {
+            pid: 2,
             name: "codex".into(),
             argv: Some(vec!["codex".into(), "resume".into(), SECOND_ID.into()]),
             argv0: Some("codex".into()),

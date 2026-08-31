@@ -26,6 +26,7 @@ pub struct Config {
     pub pi_session_dirs: Vec<PathBuf>,
     pub claude_session_dirs: Vec<PathBuf>,
     pub codex_session_dirs: Vec<PathBuf>,
+    pub opencode_database_paths: Vec<PathBuf>,
     pub tab_name: TabNameConfig,
     pub pane_name: PaneNameConfig,
 }
@@ -38,6 +39,7 @@ impl Default for Config {
             pi_session_dirs: Vec::new(),
             claude_session_dirs: Vec::new(),
             codex_session_dirs: Vec::new(),
+            opencode_database_paths: Vec::new(),
             tab_name: TabNameConfig::default(),
             pane_name: PaneNameConfig::default(),
         }
@@ -73,12 +75,19 @@ struct RawAgents {
     pi: Option<RawAgentConfig>,
     claude: Option<RawAgentConfig>,
     codex: Option<RawAgentConfig>,
+    opencode: Option<RawOpenCodeConfig>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawAgentConfig {
     session_dirs: Option<Vec<PathBuf>>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawOpenCodeConfig {
+    database_paths: Option<Vec<PathBuf>>,
 }
 
 #[derive(Debug, Error)]
@@ -184,12 +193,20 @@ impl Config {
                 .unwrap_or_default(),
             home,
         )?;
+        let opencode_database_paths = normalize_config_paths(
+            agents
+                .opencode
+                .and_then(|opencode| opencode.database_paths)
+                .unwrap_or_default(),
+            home,
+        )?;
         let config = Self {
             poll_interval_ms: raw.poll_interval_ms.unwrap_or(DEFAULT_POLL_INTERVAL_MS),
             metadata_ttl_ms: raw.metadata_ttl_ms.unwrap_or(DEFAULT_METADATA_TTL_MS),
             pi_session_dirs,
             claude_session_dirs,
             codex_session_dirs,
+            opencode_database_paths,
             tab_name: TabNameConfig {
                 enabled: raw
                     .tab_name
@@ -275,6 +292,33 @@ pub fn resolve_claude_project_roots(
         .and_then(|value| normalize_env_path(Path::new(value), home))
         .map(|path| path.join("projects"))
         .unwrap_or_else(|| home.join(".claude/projects"));
+    merge_roots(primary, additional)
+}
+
+pub fn resolve_opencode_database_paths(
+    env: &HashMap<String, String>,
+    home: &Path,
+    additional: &[PathBuf],
+) -> Vec<PathBuf> {
+    let data_directory = env
+        .get("XDG_DATA_HOME")
+        .filter(|value| !value.is_empty())
+        .map(Path::new)
+        .filter(|path| path.is_absolute())
+        .map(|path| canonical_or_normalized(path.to_owned()).join("opencode"))
+        .unwrap_or_else(|| home.join(".local/share/opencode"));
+    let primary = env
+        .get("OPENCODE_DB")
+        .filter(|value| !value.is_empty())
+        .map(Path::new)
+        .map(|path| {
+            if path.is_absolute() {
+                path.to_owned()
+            } else {
+                data_directory.join(path)
+            }
+        })
+        .unwrap_or_else(|| data_directory.join("opencode.db"));
     merge_roots(primary, additional)
 }
 
@@ -477,6 +521,84 @@ mod tests {
 
         assert!(Config::from_toml("[agents.codex]\nunknown = true", home).is_err());
         assert!(Config::from_toml("[agents.codex]\nsession_dirs = [\"relative\"]", home).is_err());
+    }
+
+    #[test]
+    fn resolves_strict_opencode_database_config_and_environment_precedence() {
+        let home = Path::new("/home/me");
+        let config = Config::from_toml(
+            "[agents.opencode]\ndatabase_paths = [\"~/extra/../extra/opencode.db\", \"/shared/opencode.db\", \"/shared/opencode.db\"]",
+            home,
+        )
+        .unwrap();
+        assert_eq!(
+            config.opencode_database_paths,
+            vec![
+                PathBuf::from("/home/me/extra/opencode.db"),
+                PathBuf::from("/shared/opencode.db"),
+                PathBuf::from("/shared/opencode.db"),
+            ]
+        );
+
+        let mut env = HashMap::new();
+        assert_eq!(
+            resolve_opencode_database_paths(&env, home, &config.opencode_database_paths),
+            vec![
+                PathBuf::from("/home/me/.local/share/opencode/opencode.db"),
+                PathBuf::from("/home/me/extra/opencode.db"),
+                PathBuf::from("/shared/opencode.db"),
+            ]
+        );
+        env.insert("XDG_DATA_HOME".into(), "/xdg/data".into());
+        assert_eq!(
+            resolve_opencode_database_paths(&env, home, &[]),
+            vec![PathBuf::from("/xdg/data/opencode/opencode.db")]
+        );
+        env.insert("OPENCODE_DB".into(), "work/custom.db".into());
+        assert_eq!(
+            resolve_opencode_database_paths(&env, home, &[]),
+            vec![PathBuf::from("/xdg/data/opencode/work/custom.db")]
+        );
+        env.insert("OPENCODE_DB".into(), "/absolute/custom.db".into());
+        assert_eq!(
+            resolve_opencode_database_paths(&env, home, &[]),
+            vec![PathBuf::from("/absolute/custom.db")]
+        );
+    }
+
+    #[test]
+    fn opencode_environment_empty_or_nonabsolute_xdg_falls_back_to_home() {
+        let home = Path::new("/home/me");
+        for xdg in ["", "relative"] {
+            let mut env = HashMap::from([("XDG_DATA_HOME".into(), xdg.into())]);
+            assert_eq!(
+                resolve_opencode_database_paths(&env, home, &[]),
+                vec![PathBuf::from("/home/me/.local/share/opencode/opencode.db")]
+            );
+            env.insert("OPENCODE_DB".into(), "relative.db".into());
+            assert_eq!(
+                resolve_opencode_database_paths(&env, home, &[]),
+                vec![PathBuf::from("/home/me/.local/share/opencode/relative.db")]
+            );
+            env.insert("OPENCODE_DB".into(), String::new());
+            assert_eq!(
+                resolve_opencode_database_paths(&env, home, &[]),
+                vec![PathBuf::from("/home/me/.local/share/opencode/opencode.db")]
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_opencode_and_unknown_agent_config_atomically() {
+        let home = Path::new("/home/me");
+        for input in [
+            "[agents.opencode]\ndatabase_paths = [\"relative.db\"]",
+            "[agents.opencode]\nsession_dirs = [\"/sessions\"]",
+            "[agents.opencode]\nunknown = true",
+            "[agents.unknown]\ndatabase_paths = [\"/database.db\"]",
+        ] {
+            assert!(Config::from_toml(input, home).is_err(), "{input}");
+        }
     }
 
     #[test]

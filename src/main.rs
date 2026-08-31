@@ -38,14 +38,7 @@ fn run() -> Result<(), String> {
     let home = env::var_os("HOME")
         .map(PathBuf::from)
         .ok_or_else(|| "HOME is not set".to_owned())?;
-    let environment: HashMap<String, String> = env::vars()
-        .filter(|(key, _)| {
-            key == "PI_CODING_AGENT_SESSION_DIR"
-                || key == "PI_CODING_AGENT_DIR"
-                || key == "CLAUDE_CONFIG_DIR"
-                || key == "CODEX_HOME"
-        })
-        .collect();
+    let environment = capture_listener_environment(env::vars());
     let mut watcher = env::var_os("HERDR_PLUGIN_CONFIG_DIR")
         .map(PathBuf::from)
         .map(|directory| ConfigWatcher::new(&directory, &home));
@@ -80,6 +73,25 @@ fn run() -> Result<(), String> {
         }
     }
     listen_forever(&socket_path, watcher.as_mut(), &mut runtime)
+}
+
+fn capture_listener_environment(
+    values: impl IntoIterator<Item = (String, String)>,
+) -> HashMap<String, String> {
+    values
+        .into_iter()
+        .filter(|(key, _)| {
+            matches!(
+                key.as_str(),
+                "PI_CODING_AGENT_SESSION_DIR"
+                    | "PI_CODING_AGENT_DIR"
+                    | "CLAUDE_CONFIG_DIR"
+                    | "CODEX_HOME"
+                    | "OPENCODE_DB"
+                    | "XDG_DATA_HOME"
+            )
+        })
+        .collect()
 }
 
 fn listen_forever(
@@ -305,6 +317,26 @@ impl ListenerLock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn listener_captures_only_backend_path_environment_once() {
+        let captured = capture_listener_environment([
+            ("OPENCODE_DB".into(), "relative.db".into()),
+            ("XDG_DATA_HOME".into(), "/xdg".into()),
+            ("CODEX_HOME".into(), "/codex".into()),
+            ("UNRELATED_SECRET".into(), "must-not-be-captured".into()),
+        ]);
+        assert_eq!(captured.len(), 3);
+        assert_eq!(
+            captured.get("OPENCODE_DB").map(String::as_str),
+            Some("relative.db")
+        );
+        assert_eq!(
+            captured.get("XDG_DATA_HOME").map(String::as_str),
+            Some("/xdg")
+        );
+        assert!(!captured.contains_key("UNRELATED_SECRET"));
+    }
 
     #[test]
     fn invalid_initial_config_uses_complete_defaults() {

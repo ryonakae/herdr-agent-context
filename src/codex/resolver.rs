@@ -420,6 +420,7 @@ mod tests {
 
     fn command(args: Option<&[&str]>) -> ProcessCommand {
         ProcessCommand {
+            pid: 1,
             name: "codex".into(),
             argv: args.map(|args| args.iter().map(|value| (*value).to_owned()).collect()),
             argv0: Some("codex".into()),

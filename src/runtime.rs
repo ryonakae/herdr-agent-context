@@ -195,6 +195,7 @@ impl Runtime {
                 .foreground_processes
                 .into_iter()
                 .map(|process| ProcessCommand {
+                    pid: process.pid,
                     name: process.name,
                     argv: process.argv,
                     argv0: process.argv0,

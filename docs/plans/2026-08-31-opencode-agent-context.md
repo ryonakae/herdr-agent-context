@@ -160,7 +160,7 @@ The reader contract is:
 
 - Review base: `8518acc4972f8a8a85b780aa428d511f68f3bf77`
 - [x] Task 1: Read OpenCode 1.x sessions into privacy-bounded display views.
-- [ ] Task 2: Resolve OpenCode database configuration, CLI eligibility, authority, and conservative fallback binding.
+- [x] Task 2: Resolve OpenCode database configuration, CLI eligibility, authority, and conservative fallback binding.
 - [ ] Task 3: Integrate OpenCode metadata and automatic tab/pane labels without regressing existing agents.
 - [ ] Task 4: Publish the OpenCode contract, complete independent review, and pass every repository validation gate.
 
@@ -280,6 +280,8 @@ Implementation-time minor file changes or internal differences must be reflected
 - Expected: all OpenCode env/config/registry tests and every binary test pass; strict existing behavior remains green and the binary command does not report zero tests solely because of a name filter.
 - Run: `cargo test pi:: --lib --locked && cargo test claude:: --lib --locked && cargo test codex:: --lib --locked`
 - Expected: every existing backend suite passes unchanged.
+
+**Implementation record (2026-08-31):** Complete. Red slices began with missing strict config fields/resolution, then exposed a partial-database fallback when a second database lacked required schema and macOS canonical-cwd lookup gaps. The final backend carries Herdr process PID, accepts documented OpenCode 1.18.23 root-TUI options, excludes non-root commands, applies official/exact/sticky/observed precedence, discards fork-parent hints, scans 30-day/25-compatible root candidates with per-session fingerprints, and preserves fail-closed baselines across failed databases. `ProcessCommand.pid` was added mechanically to existing backend tests without changing their semantics. `cargo test opencode:: --lib --locked` passes 30 tests; config passes 14, registry 3, binary 7, Pi 18, Claude 27, and Codex 31. All-target Clippy, format, and whitespace checks pass.
 
 ### Task 3: Sidebar, Tab, Pane, TTL, and Retention Integration
 

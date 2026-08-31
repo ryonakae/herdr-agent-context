@@ -344,6 +344,7 @@ mod tests {
             terminal_title: None,
             authoritative_session: None,
             processes: vec![ProcessCommand {
+                pid: 1,
                 name: "claude".into(),
                 argv: Some(vec!["claude".into()]),
                 argv0: Some("claude".into()),
