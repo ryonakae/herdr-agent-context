@@ -1,6 +1,6 @@
 use crate::backend::{
-    BackendOutcome, BackendRegistry, Binding, CLAUDE_AGENT, CODEX_AGENT, DisplayView, PaneInput,
-    PaneKey, ProcessCommand, SessionReference,
+    BackendOutcome, BackendRegistry, Binding, CLAUDE_AGENT, CODEX_AGENT, DisplayView,
+    OPENCODE_AGENT, PaneInput, PaneKey, ProcessCommand, SessionReference,
 };
 use crate::config::Config;
 use crate::herdr::protocol::{SessionSnapshot, SnapshotPane, TabLayout};
@@ -834,7 +834,9 @@ fn contributor_binding_identity(
     binding: &Binding,
     session_identity: Option<&str>,
 ) -> Vec<u8> {
-    if (agent.eq_ignore_ascii_case(CLAUDE_AGENT) || agent.eq_ignore_ascii_case(CODEX_AGENT))
+    if (agent.eq_ignore_ascii_case(CLAUDE_AGENT)
+        || agent.eq_ignore_ascii_case(CODEX_AGENT)
+        || agent.eq_ignore_ascii_case(OPENCODE_AGENT))
         && let Some(session_identity) = session_identity
     {
         return session_identity.as_bytes().to_vec();
@@ -898,6 +900,23 @@ mod tests {
         let mut snapshot = naming_snapshot();
         snapshot.panes[0].tab_id = "w1:other".into();
         assert!(validate_naming_snapshot(&snapshot).is_none());
+    }
+
+    #[test]
+    fn opencode_naming_contributor_uses_session_identity_instead_of_shared_database() {
+        let binding = Binding {
+            path: PathBuf::from("/synthetic/opencode/opencode.db"),
+            evidence: crate::backend::BindingEvidence::ExactIdentityHint,
+        };
+
+        assert_eq!(
+            contributor_binding_identity(OPENCODE_AGENT, &binding, Some("ses_runtime_one")),
+            b"ses_runtime_one"
+        );
+        assert_eq!(
+            contributor_binding_identity(OPENCODE_AGENT, &binding, Some("ses_runtime_two")),
+            b"ses_runtime_two"
+        );
     }
 
     #[test]

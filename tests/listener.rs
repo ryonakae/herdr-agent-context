@@ -6,6 +6,7 @@ use herdr_agent_context::herdr::protocol::{
 use herdr_agent_context::herdr::socket::{EventPoll, SocketError, SocketTransport};
 use herdr_agent_context::herdr::{HerdrApi, MetadataReport};
 use herdr_agent_context::runtime::Runtime;
+use rusqlite::{Connection, params};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::fs;
@@ -15,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Debug)]
 struct Report {
@@ -38,6 +39,7 @@ enum FakeError {
 struct FakeApi {
     agents: Vec<AgentInfo>,
     process_args: HashMap<String, Vec<String>>,
+    process_pids: HashMap<String, u32>,
     snapshot: SessionSnapshot,
     snapshot_calls: usize,
     fail_snapshot_topology: bool,
@@ -67,6 +69,7 @@ impl HerdrApi for FakeApi {
 
     fn process_info(&mut self, pane_id: &str) -> Result<ProcessInfo, Self::Error> {
         let argv = self.process_args.get(pane_id).cloned().unwrap_or_default();
+        let pid = self.process_pids.get(pane_id).copied().unwrap_or(1);
         let executable = argv
             .first()
             .and_then(|value| Path::new(value).file_name())
@@ -76,7 +79,7 @@ impl HerdrApi for FakeApi {
         Ok(ProcessInfo {
             pane_id: pane_id.to_owned(),
             foreground_processes: vec![herdr_agent_context::herdr::protocol::Process {
-                pid: 1,
+                pid,
                 name: executable.clone(),
                 argv: Some(argv),
                 argv0: Some(executable),
@@ -228,6 +231,7 @@ fn fake_api() -> FakeApi {
     FakeApi {
         agents: vec![agent()],
         process_args: HashMap::from([("w1:p1".into(), vec!["pi".into()])]),
+        process_pids: HashMap::new(),
         snapshot: SessionSnapshot {
             tabs: Vec::new(),
             layouts: Vec::new(),
@@ -413,6 +417,177 @@ fn codex_runtime(root: PathBuf, tab_enabled: bool, pane_enabled: bool) -> Runtim
         PathBuf::from("/no-home"),
         HashMap::new(),
     )
+}
+
+fn opencode_agent(cwd: &Path, pane_id: &str) -> AgentInfo {
+    supported_agent("opencode", cwd.to_str().unwrap(), pane_id)
+}
+
+fn create_opencode_database(path: &Path) -> Connection {
+    let connection = Connection::open(path).unwrap();
+    connection
+        .execute_batch(
+            "
+            CREATE TABLE session (
+                id TEXT PRIMARY KEY,
+                parent_id TEXT,
+                directory TEXT NOT NULL,
+                title TEXT NOT NULL,
+                time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL,
+                time_archived INTEGER
+            );
+            CREATE TABLE message (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL,
+                data TEXT NOT NULL
+            );
+            CREATE TABLE part (
+                id TEXT PRIMARY KEY,
+                message_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL,
+                data TEXT NOT NULL
+            );
+            ",
+        )
+        .unwrap();
+    connection
+}
+
+fn insert_opencode_session(
+    connection: &Connection,
+    id: &str,
+    cwd: &Path,
+    title: &str,
+    user_text: &str,
+    assistant_text: Option<&str>,
+    timestamp: i64,
+) {
+    connection
+        .execute(
+            "INSERT INTO session VALUES (?1, NULL, ?2, ?3, ?4, ?4, NULL)",
+            params![id, cwd.to_str().unwrap(), title, timestamp],
+        )
+        .unwrap();
+    let user_message = format!("msg_user_{id}");
+    connection
+        .execute(
+            "INSERT INTO message VALUES (?1, ?2, ?3, ?3, ?4)",
+            params![user_message, id, timestamp + 1, r#"{"role":"user"}"#],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO part VALUES (?1, ?2, ?3, ?4, ?4, ?5)",
+            params![
+                format!("part_user_{id}"),
+                user_message,
+                id,
+                timestamp + 1,
+                json!({"type": "text", "text": user_text}).to_string()
+            ],
+        )
+        .unwrap();
+    if let Some(assistant_text) = assistant_text {
+        let assistant_message = format!("msg_assistant_{id}");
+        connection
+            .execute(
+                "INSERT INTO message VALUES (?1, ?2, ?3, ?3, ?4)",
+                params![
+                    assistant_message,
+                    id,
+                    timestamp + 2,
+                    r#"{"role":"assistant"}"#
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO part VALUES (?1, ?2, ?3, ?4, ?4, ?5)",
+                params![
+                    format!("part_assistant_{id}"),
+                    assistant_message,
+                    id,
+                    timestamp + 2,
+                    json!({"type": "text", "text": assistant_text}).to_string()
+                ],
+            )
+            .unwrap();
+    }
+}
+
+fn append_opencode_user(connection: &Connection, id: &str, text: &str, timestamp: i64) {
+    let message_id = format!("msg_user_{id}_{timestamp}");
+    connection
+        .execute(
+            "INSERT INTO message VALUES (?1, ?2, ?3, ?3, ?4)",
+            params![message_id, id, timestamp, r#"{"role":"user"}"#],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO part VALUES (?1, ?2, ?3, ?4, ?4, ?5)",
+            params![
+                format!("part_user_{id}_{timestamp}"),
+                message_id,
+                id,
+                timestamp,
+                json!({"type": "text", "text": text}).to_string()
+            ],
+        )
+        .unwrap();
+}
+
+fn append_opencode_assistant(connection: &Connection, id: &str, text: &str, timestamp: i64) {
+    let message_id = format!("msg_assistant_{id}_{timestamp}");
+    connection
+        .execute(
+            "INSERT INTO message VALUES (?1, ?2, ?3, ?3, ?4)",
+            params![message_id, id, timestamp, r#"{"role":"assistant"}"#],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO part VALUES (?1, ?2, ?3, ?4, ?4, ?5)",
+            params![
+                format!("part_assistant_{id}_{timestamp}"),
+                message_id,
+                id,
+                timestamp,
+                json!({"type": "text", "text": text}).to_string()
+            ],
+        )
+        .unwrap();
+}
+
+fn opencode_runtime(database: &Path, tab_enabled: bool, pane_enabled: bool) -> Runtime {
+    Runtime::new(
+        Config {
+            tab_name: herdr_agent_context::config::TabNameConfig {
+                enabled: tab_enabled,
+            },
+            pane_name: herdr_agent_context::config::PaneNameConfig {
+                enabled: pane_enabled,
+            },
+            ..Config::default()
+        },
+        PathBuf::from("/no-home"),
+        HashMap::from([(
+            "OPENCODE_DB".into(),
+            database.to_string_lossy().into_owned(),
+        )]),
+    )
+}
+
+fn opencode_now_millis() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
 }
 
 #[test]
@@ -3736,6 +3911,810 @@ fn codex_excluded_process_clear_failure_is_retried() {
     assert_eq!(api.reports[1].agent, "codex");
     assert_eq!(api.reports[1].session_name, None);
     assert_eq!(api.reports[1].last_message, None);
+}
+
+#[test]
+fn opencode_runtime_reports_mixed_agents_and_scopes_only_official_identity() {
+    let temp = tempfile::tempdir().unwrap();
+    let pi_root = temp.path().join("pi");
+    let claude_root = temp.path().join("claude");
+    let claude_project = claude_root.join("-synthetic-claude");
+    let codex_root = temp.path().join("codex/sessions");
+    let opencode_project = temp.path().join("opencode-project");
+    fs::create_dir_all(&pi_root).unwrap();
+    fs::create_dir_all(&claude_project).unwrap();
+    fs::create_dir(&opencode_project).unwrap();
+    fs::write(
+        pi_root.join("session.jsonl"),
+        pi_session_text("/synthetic/pi", "Pi task", "Pi answer"),
+    )
+    .unwrap();
+    let claude_id = "61000000-0000-4000-8000-000000000001";
+    fs::write(
+        claude_project.join(format!("{claude_id}.jsonl")),
+        claude_session_text(
+            claude_id,
+            "/synthetic/claude",
+            "Claude task",
+            "Claude answer",
+        ),
+    )
+    .unwrap();
+    let codex_id = "61000000-0000-4000-8000-000000000002";
+    write_codex_rollout(
+        &codex_root,
+        codex_id,
+        "/synthetic/codex",
+        "Codex task",
+        &[("Codex answer", Some("final_answer"))],
+    );
+    let database = temp.path().join("opencode.db");
+    let connection = create_opencode_database(&database);
+    let opencode_id = "ses_mixed_official";
+    insert_opencode_session(
+        &connection,
+        opencode_id,
+        &opencode_project,
+        "OpenCode task",
+        "OpenCode prompt",
+        Some("OpenCode answer"),
+        1,
+    );
+
+    let mut opencode = opencode_agent(&opencode_project, "w1:p4");
+    opencode.agent_session = Some(AgentSessionInfo {
+        source: "herdr:opencode".into(),
+        agent: "opencode".into(),
+        kind: "id".into(),
+        value: opencode_id.into(),
+    });
+    let mut api = FakeApi {
+        agents: vec![
+            supported_agent("pi", "/synthetic/pi", "w1:p1"),
+            claude_agent("/synthetic/claude", "w1:p2"),
+            codex_agent("/synthetic/codex", "w1:p3"),
+            opencode,
+        ],
+        process_args: HashMap::from([
+            ("w1:p1".into(), vec!["pi".into()]),
+            (
+                "w1:p2".into(),
+                vec!["claude".into(), "--session-id".into(), claude_id.into()],
+            ),
+            (
+                "w1:p3".into(),
+                vec!["codex".into(), "resume".into(), codex_id.into()],
+            ),
+            ("w1:p4".into(), vec!["opencode".into()]),
+        ]),
+        ..fake_api()
+    };
+    let mut runtime = Runtime::new(
+        Config {
+            pi_session_dirs: vec![pi_root],
+            claude_session_dirs: vec![claude_root],
+            codex_session_dirs: vec![codex_root],
+            ..Config::default()
+        },
+        PathBuf::from("/no-home"),
+        HashMap::from([(
+            "OPENCODE_DB".into(),
+            database.to_string_lossy().into_owned(),
+        )]),
+    );
+
+    runtime.reconcile(&mut api).unwrap();
+
+    assert_eq!(api.reports.len(), 4);
+    for (pane_id, agent, name, activity) in [
+        ("w1:p1", "pi", "Pi task", "Pi answer"),
+        ("w1:p2", "claude", "Claude task", "Claude answer"),
+        ("w1:p3", "codex", "Codex task", "Codex answer"),
+        ("w1:p4", "opencode", "OpenCode task", "OpenCode answer"),
+    ] {
+        let report = api
+            .reports
+            .iter()
+            .find(|report| report.pane_id == pane_id)
+            .unwrap();
+        assert_eq!(report.agent, agent);
+        assert_eq!(report.session_name.as_deref(), Some(name));
+        assert_eq!(report.last_message.as_deref(), Some(activity));
+    }
+    assert_eq!(
+        api.reports
+            .iter()
+            .find(|report| report.pane_id == "w1:p4")
+            .unwrap()
+            .applies_to_source
+            .as_deref(),
+        Some("herdr:opencode")
+    );
+}
+
+#[test]
+fn opencode_exact_updates_streaming_context_and_isolates_retention_replacements() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    fs::create_dir(&project).unwrap();
+    let first_database = temp.path().join("first.db");
+    let second_database = temp.path().join("second.db");
+    let first_connection = create_opencode_database(&first_database);
+    let second_connection = create_opencode_database(&second_database);
+    let first_id = "ses_retention_first";
+    let second_id = "ses_retention_second";
+    insert_opencode_session(
+        &first_connection,
+        first_id,
+        &project,
+        "Initial title",
+        "Initial prompt",
+        Some("Streaming answer"),
+        1,
+    );
+    insert_opencode_session(
+        &second_connection,
+        second_id,
+        &project,
+        "Second title",
+        "Second prompt",
+        None,
+        20,
+    );
+    let mut api = FakeApi {
+        agents: vec![opencode_agent(&project, "w1:p1")],
+        process_args: HashMap::from([(
+            "w1:p1".into(),
+            vec!["opencode".into(), "--session".into(), first_id.into()],
+        )]),
+        ..fake_api()
+    };
+    let mut runtime = Runtime::new(
+        Config {
+            opencode_database_paths: vec![second_database.clone()],
+            ..Config::default()
+        },
+        PathBuf::from("/no-home"),
+        HashMap::from([(
+            "OPENCODE_DB".into(),
+            first_database.to_string_lossy().into_owned(),
+        )]),
+    );
+
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(api.reports[0].applies_to_source, None);
+    assert_eq!(
+        api.reports[0].session_name.as_deref(),
+        Some("Initial title")
+    );
+    assert_eq!(
+        api.reports[0].last_message.as_deref(),
+        Some("Streaming answer")
+    );
+
+    first_connection
+        .execute(
+            "UPDATE session SET title = 'Renamed title', time_updated = 5 WHERE id = ?1",
+            [first_id],
+        )
+        .unwrap();
+    first_connection
+        .execute(
+            "UPDATE part SET data = ?1, time_updated = 5 WHERE id = ?2",
+            params![
+                json!({"type": "text", "text": "Streamed replacement"}).to_string(),
+                format!("part_assistant_{first_id}")
+            ],
+        )
+        .unwrap();
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(
+        api.reports[1].session_name.as_deref(),
+        Some("Renamed title")
+    );
+    assert_eq!(
+        api.reports[1].last_message.as_deref(),
+        Some("Streamed replacement")
+    );
+
+    append_opencode_user(&first_connection, first_id, "Next prompt", 10);
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(
+        api.reports[2].last_message.as_deref(),
+        Some("Streamed replacement")
+    );
+    append_opencode_assistant(&first_connection, first_id, "Final replacement", 11);
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(
+        api.reports[3].last_message.as_deref(),
+        Some("Final replacement")
+    );
+
+    api.process_args.insert(
+        "w1:p1".into(),
+        vec!["opencode".into(), "--session".into(), second_id.into()],
+    );
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(
+        api.reports.last().unwrap().session_name.as_deref(),
+        Some("Second title")
+    );
+    assert_eq!(api.reports.last().unwrap().last_message, None);
+
+    append_opencode_assistant(&second_connection, second_id, "Second answer", 22);
+    runtime.reconcile(&mut api).unwrap();
+    append_opencode_user(&second_connection, second_id, "After terminal", 23);
+    api.agents[0].terminal_id = "replacement-terminal".into();
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(api.reports.last().unwrap().last_message, None);
+
+    append_opencode_assistant(&second_connection, second_id, "After terminal answer", 24);
+    runtime.reconcile(&mut api).unwrap();
+    api.agents[0].agent = Some("unknown".into());
+    runtime.reconcile(&mut api).unwrap();
+    api.agents[0].agent = Some("opencode".into());
+    append_opencode_user(&second_connection, second_id, "After agent", 25);
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(api.reports.last().unwrap().last_message, None);
+
+    second_connection
+        .execute("DELETE FROM part WHERE session_id = ?1", [second_id])
+        .unwrap();
+    second_connection
+        .execute("DELETE FROM message WHERE session_id = ?1", [second_id])
+        .unwrap();
+    second_connection
+        .execute("DELETE FROM session WHERE id = ?1", [second_id])
+        .unwrap();
+    insert_opencode_session(
+        &first_connection,
+        second_id,
+        &project,
+        "Moved database",
+        "Moved prompt",
+        None,
+        30,
+    );
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(
+        api.reports.last().unwrap().session_name.as_deref(),
+        Some("Moved database")
+    );
+    assert_eq!(api.reports.last().unwrap().last_message, None);
+}
+
+#[test]
+fn opencode_local_binding_requires_fresh_evidence_after_pid_replacement() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    fs::create_dir(&project).unwrap();
+    let database = temp.path().join("opencode.db");
+    let connection = create_opencode_database(&database);
+    let id = "ses_pid_generation";
+    let now = opencode_now_millis();
+    insert_opencode_session(
+        &connection,
+        id,
+        &project,
+        "Observed title",
+        "Observed prompt",
+        Some("Observed answer"),
+        now,
+    );
+    let mut api = FakeApi {
+        agents: vec![opencode_agent(&project, "w1:p1")],
+        process_args: HashMap::from([("w1:p1".into(), vec!["opencode".into()])]),
+        process_pids: HashMap::from([("w1:p1".into(), 100)]),
+        ..fake_api()
+    };
+    let mut runtime = opencode_runtime(&database, false, false);
+
+    runtime.reconcile(&mut api).unwrap();
+    assert!(api.reports.is_empty());
+    connection
+        .execute(
+            "UPDATE session SET title = 'Bound title', time_updated = ?1 WHERE id = ?2",
+            params![now + 10, id],
+        )
+        .unwrap();
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(api.reports.len(), 1);
+    assert_eq!(api.reports[0].applies_to_source, None);
+    assert_eq!(api.reports[0].session_name.as_deref(), Some("Bound title"));
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(api.reports.len(), 2);
+    assert_eq!(api.reports[1].session_name.as_deref(), Some("Bound title"));
+
+    api.process_pids.insert("w1:p1".into(), 101);
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(api.reports.len(), 3);
+    assert_eq!(api.reports[2].session_name, None);
+    assert_eq!(api.reports[2].last_message, None);
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(api.reports.len(), 3);
+
+    connection
+        .execute(
+            "UPDATE session SET title = 'Fresh evidence', time_updated = ?1 WHERE id = ?2",
+            params![now + 20, id],
+        )
+        .unwrap();
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(api.reports.len(), 4);
+    assert_eq!(
+        api.reports[3].session_name.as_deref(),
+        Some("Fresh evidence")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn opencode_bound_database_failures_skip_ttl_refresh_and_do_not_block_pi() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let pi_root = temp.path().join("pi");
+    let project = temp.path().join("project");
+    fs::create_dir(&pi_root).unwrap();
+    fs::create_dir(&project).unwrap();
+    fs::write(
+        pi_root.join("session.jsonl"),
+        pi_session_text("/synthetic/pi", "Pi task", "Pi answer"),
+    )
+    .unwrap();
+    let database = temp.path().join("opencode.db");
+    let connection = create_opencode_database(&database);
+    let id = "ses_failure_repair";
+    insert_opencode_session(
+        &connection,
+        id,
+        &project,
+        "OpenCode title",
+        "OpenCode prompt",
+        Some("OpenCode answer"),
+        1,
+    );
+    let mut api = FakeApi {
+        agents: vec![
+            supported_agent("pi", "/synthetic/pi", "w1:p1"),
+            opencode_agent(&project, "w1:p2"),
+        ],
+        process_args: HashMap::from([
+            ("w1:p1".into(), vec!["pi".into()]),
+            (
+                "w1:p2".into(),
+                vec!["opencode".into(), "--session".into(), id.into()],
+            ),
+        ]),
+        ..fake_api()
+    };
+    let mut runtime = Runtime::new(
+        Config {
+            pi_session_dirs: vec![pi_root],
+            ..Config::default()
+        },
+        PathBuf::from("/no-home"),
+        HashMap::from([(
+            "OPENCODE_DB".into(),
+            database.to_string_lossy().into_owned(),
+        )]),
+    );
+    runtime.reconcile(&mut api).unwrap();
+
+    connection.execute_batch("BEGIN EXCLUSIVE").unwrap();
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(
+        api.reports
+            .iter()
+            .filter(|report| report.agent == "pi")
+            .count(),
+        2
+    );
+    assert_eq!(
+        api.reports
+            .iter()
+            .filter(|report| report.agent == "opencode")
+            .count(),
+        1
+    );
+    connection.execute_batch("ROLLBACK").unwrap();
+    runtime.reconcile(&mut api).unwrap();
+
+    connection
+        .execute(
+            "UPDATE message SET data = ?1 WHERE id = ?2",
+            params![r#"{"role":false}"#, format!("msg_user_{id}")],
+        )
+        .unwrap();
+    let opencode_reports = api
+        .reports
+        .iter()
+        .filter(|report| report.agent == "opencode")
+        .count();
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(
+        api.reports
+            .iter()
+            .filter(|report| report.agent == "opencode")
+            .count(),
+        opencode_reports
+    );
+    connection
+        .execute(
+            "UPDATE message SET data = ?1 WHERE id = ?2",
+            params![r#"{"role":"user"}"#, format!("msg_user_{id}")],
+        )
+        .unwrap();
+    runtime.reconcile(&mut api).unwrap();
+
+    fs::set_permissions(&database, fs::Permissions::from_mode(0o000)).unwrap();
+    let opencode_reports = api
+        .reports
+        .iter()
+        .filter(|report| report.agent == "opencode")
+        .count();
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(
+        api.reports
+            .iter()
+            .filter(|report| report.agent == "opencode")
+            .count(),
+        opencode_reports
+    );
+    fs::set_permissions(&database, fs::Permissions::from_mode(0o600)).unwrap();
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(
+        api.reports
+            .iter()
+            .filter(|report| report.agent == "opencode")
+            .count(),
+        opencode_reports + 1
+    );
+}
+
+#[test]
+fn opencode_unresolved_authority_and_excluded_process_clear_and_retry() {
+    for mode in ["official", "exact", "excluded"] {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        fs::create_dir(&project).unwrap();
+        let database = temp.path().join("opencode.db");
+        let connection = create_opencode_database(&database);
+        let first_id = "ses_clear_first";
+        let missing_id = "ses_clear_missing";
+        insert_opencode_session(
+            &connection,
+            first_id,
+            &project,
+            "First title",
+            "First prompt",
+            Some("First answer"),
+            1,
+        );
+        let mut pane = opencode_agent(&project, "w1:p1");
+        if mode == "official" {
+            pane.agent_session = Some(AgentSessionInfo {
+                source: "herdr:opencode".into(),
+                agent: "opencode".into(),
+                kind: "id".into(),
+                value: first_id.into(),
+            });
+        }
+        let args = if mode == "official" {
+            vec!["opencode".into()]
+        } else {
+            vec!["opencode".into(), "--session".into(), first_id.into()]
+        };
+        let mut api = FakeApi {
+            agents: vec![pane],
+            process_args: HashMap::from([("w1:p1".into(), args)]),
+            ..fake_api()
+        };
+        let mut runtime = opencode_runtime(&database, false, false);
+        runtime.reconcile(&mut api).unwrap();
+        assert_eq!(api.reports.len(), 1, "mode: {mode}");
+
+        if mode == "official" {
+            api.agents[0].agent_session.as_mut().unwrap().value = missing_id.into();
+        } else if mode == "exact" {
+            api.process_args.insert(
+                "w1:p1".into(),
+                vec!["opencode".into(), "--session".into(), missing_id.into()],
+            );
+        } else {
+            api.process_args
+                .insert("w1:p1".into(), vec!["opencode".into(), "run".into()]);
+        }
+        api.fail_next_clear = true;
+        assert!(runtime.reconcile(&mut api).is_err(), "mode: {mode}");
+        assert_eq!(api.reports.len(), 1, "mode: {mode}");
+        runtime.reconcile(&mut api).unwrap();
+        assert_eq!(api.reports.len(), 2, "mode: {mode}");
+        assert_eq!(api.reports[1].session_name, None, "mode: {mode}");
+        assert_eq!(api.reports[1].last_message, None, "mode: {mode}");
+        runtime.reconcile(&mut api).unwrap();
+        assert_eq!(api.reports.len(), 2, "mode: {mode}");
+
+        if mode != "excluded" {
+            insert_opencode_session(
+                &connection,
+                missing_id,
+                &project,
+                "Replacement title",
+                "Replacement prompt",
+                None,
+                10,
+            );
+            runtime.reconcile(&mut api).unwrap();
+            assert_eq!(api.reports.len(), 3, "mode: {mode}");
+            assert_eq!(
+                api.reports[2].session_name.as_deref(),
+                Some("Replacement title"),
+                "mode: {mode}"
+            );
+            assert_eq!(api.reports[2].last_message, None, "mode: {mode}");
+            assert_eq!(
+                api.reports[2].applies_to_source.as_deref(),
+                (mode == "official").then_some("herdr:opencode"),
+                "mode: {mode}"
+            );
+        }
+    }
+}
+
+#[test]
+fn opencode_pane_manual_override_is_scoped_by_session_id_within_one_database() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    let state = temp.path().join("state");
+    fs::create_dir(&project).unwrap();
+    fs::create_dir(&state).unwrap();
+    let database = temp.path().join("opencode.db");
+    let connection = create_opencode_database(&database);
+    let first_id = "ses_pane_first";
+    let second_id = "ses_pane_second";
+    insert_opencode_session(
+        &connection,
+        first_id,
+        &project,
+        "First title",
+        "First prompt",
+        Some("First answer"),
+        1,
+    );
+    insert_opencode_session(
+        &connection,
+        second_id,
+        &project,
+        "Second title",
+        "Second prompt",
+        Some("Second answer"),
+        10,
+    );
+    let mut api = single_pi_tab_api("tab baseline");
+    api.agents = vec![opencode_agent(&project, "w1:p1")];
+    api.process_args.insert(
+        "w1:p1".into(),
+        vec!["opencode".into(), "--session".into(), first_id.into()],
+    );
+    api.snapshot.panes[0].label = Some("pane baseline".into());
+    let mut runtime = opencode_runtime(&database, false, true);
+    runtime
+        .initialize_pane_names(
+            &state,
+            Path::new("/tmp/herdr-opencode-pane-session-id.sock"),
+        )
+        .unwrap();
+
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(api.snapshot.panes[0].label.as_deref(), Some("First title"));
+    api.snapshot.panes[0].label = Some("manual first".into());
+    runtime.reconcile(&mut api).unwrap();
+
+    api.process_args.insert(
+        "w1:p1".into(),
+        vec!["opencode".into(), "--session".into(), second_id.into()],
+    );
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(api.snapshot.panes[0].label.as_deref(), Some("Second title"));
+
+    api.process_args.insert(
+        "w1:p1".into(),
+        vec!["opencode".into(), "--session".into(), first_id.into()],
+    );
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(api.snapshot.panes[0].label.as_deref(), Some("manual first"));
+}
+
+#[test]
+fn opencode_mixed_tab_uses_visual_order_and_restores_manual_baseline_on_ambiguity() {
+    let temp = tempfile::tempdir().unwrap();
+    let pi_root = temp.path().join("pi");
+    let project = temp.path().join("project");
+    let state = temp.path().join("state");
+    fs::create_dir(&pi_root).unwrap();
+    fs::create_dir(&project).unwrap();
+    fs::create_dir(&state).unwrap();
+    fs::write(
+        pi_root.join("session.jsonl"),
+        pi_session_text("/synthetic/pi", "Pi", "Pi answer"),
+    )
+    .unwrap();
+    let database = temp.path().join("opencode.db");
+    let connection = create_opencode_database(&database);
+    let first_id = "ses_tab_first";
+    let second_id = "ses_tab_second";
+    let now = opencode_now_millis();
+    insert_opencode_session(
+        &connection,
+        first_id,
+        &project,
+        "OpenCode",
+        "First prompt",
+        Some("First answer"),
+        now,
+    );
+    insert_opencode_session(
+        &connection,
+        second_id,
+        &project,
+        "Other",
+        "Second prompt",
+        Some("Second answer"),
+        now,
+    );
+    let mut opencode = opencode_agent(&project, "w1:p2");
+    opencode.tab_id = Some("w1:t1".into());
+    let mut api = FakeApi {
+        agents: vec![supported_agent("pi", "/synthetic/pi", "w1:p1"), opencode],
+        process_args: HashMap::from([
+            ("w1:p1".into(), vec!["pi".into()]),
+            (
+                "w1:p2".into(),
+                vec!["opencode".into(), "--session".into(), first_id.into()],
+            ),
+        ]),
+        process_pids: HashMap::from([("w1:p2".into(), 100)]),
+        snapshot: SessionSnapshot {
+            tabs: vec![TabInfo {
+                tab_id: "w1:t1".into(),
+                workspace_id: "w1".into(),
+                number: 1,
+                label: "manual baseline".into(),
+            }],
+            layouts: vec![TabLayout {
+                workspace_id: "w1".into(),
+                tab_id: "w1:t1".into(),
+                focused_pane_id: "w1:p1".into(),
+                panes: vec![layout_pane("w1:p1", 0, 10), layout_pane("w1:p2", 0, 0)],
+            }],
+            panes: vec![
+                snapshot_pane("w1:p1", "w1", "w1:t1"),
+                snapshot_pane("w1:p2", "w1", "w1:t1"),
+            ],
+        },
+        ..fake_api()
+    };
+    let mut runtime = Runtime::new(
+        Config {
+            pi_session_dirs: vec![pi_root],
+            tab_name: herdr_agent_context::config::TabNameConfig { enabled: true },
+            ..Config::default()
+        },
+        PathBuf::from("/no-home"),
+        HashMap::from([(
+            "OPENCODE_DB".into(),
+            database.to_string_lossy().into_owned(),
+        )]),
+    );
+    runtime
+        .initialize_tab_names(&state, Path::new("/tmp/herdr-opencode-mixed-tab.sock"))
+        .unwrap();
+
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(api.renames.last().unwrap().1, "OpenCode + Pi");
+
+    api.agents.retain(|agent| agent.pane_id == "w1:p2");
+    api.snapshot.panes.retain(|pane| pane.pane_id == "w1:p2");
+    api.snapshot.layouts[0].panes = vec![layout_pane("w1:p2", 0, 0)];
+    api.process_args
+        .insert("w1:p2".into(), vec!["opencode".into()]);
+    api.process_pids.insert("w1:p2".into(), 101);
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(api.renames.last().unwrap().1, "manual baseline");
+
+    connection
+        .execute(
+            "UPDATE session SET title = title || ' changed', time_updated = ?1",
+            [now + 20],
+        )
+        .unwrap();
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(api.renames.last().unwrap().1, "manual baseline");
+    assert_eq!(api.renames.len(), 2);
+}
+
+#[test]
+fn opencode_sidebar_and_shared_naming_apply_exact_80_scalar_and_20_column_bounds() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    let state = temp.path().join("state");
+    fs::create_dir(&project).unwrap();
+    fs::create_dir(&state).unwrap();
+    let database = temp.path().join("opencode.db");
+    let connection = create_opencode_database(&database);
+    let id = "ses_bounds";
+    let name = "名".repeat(81);
+    let activity = "答".repeat(81);
+    insert_opencode_session(
+        &connection,
+        id,
+        &project,
+        &name,
+        "Prompt",
+        Some(&activity),
+        1,
+    );
+    let mut api = single_pi_tab_api("tab baseline");
+    api.agents = vec![opencode_agent(&project, "w1:p1")];
+    api.process_args.insert(
+        "w1:p1".into(),
+        vec!["opencode".into(), "--session".into(), id.into()],
+    );
+    api.snapshot.panes[0].label = Some("pane baseline".into());
+    let mut runtime = opencode_runtime(&database, true, true);
+    let socket = Path::new("/tmp/herdr-opencode-bounds.sock");
+    runtime.initialize_tab_names(&state, socket).unwrap();
+    runtime.initialize_pane_names(&state, socket).unwrap();
+
+    runtime.reconcile(&mut api).unwrap();
+
+    let bounded_name = format!("{}…", "名".repeat(79));
+    let bounded_activity = format!("{}…", "答".repeat(79));
+    assert_eq!(
+        api.reports[0].session_name.as_deref(),
+        Some(bounded_name.as_str())
+    );
+    assert_eq!(
+        api.reports[0].last_message.as_deref(),
+        Some(bounded_activity.as_str())
+    );
+    let naming_bound = format!("{}…", "名".repeat(9));
+    assert_eq!(api.renames.last().unwrap().1, naming_bound);
+    assert_eq!(
+        api.pane_renames.last().unwrap().1.as_deref(),
+        Some(naming_bound.as_str())
+    );
+
+    connection
+        .execute(
+            "UPDATE session SET title = 'Renamed title', time_updated = 5 WHERE id = ?1",
+            [id],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE part SET data = ?1, time_updated = 5 WHERE id = ?2",
+            params![
+                json!({"type": "text", "text": "Stream update"}).to_string(),
+                format!("part_assistant_{id}")
+            ],
+        )
+        .unwrap();
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(
+        api.reports.last().unwrap().session_name.as_deref(),
+        Some("Renamed title")
+    );
+    assert_eq!(
+        api.reports.last().unwrap().last_message.as_deref(),
+        Some("Stream update")
+    );
+    assert_eq!(api.renames.last().unwrap().1, "Renamed title");
+    assert_eq!(
+        api.pane_renames.last().unwrap().1.as_deref(),
+        Some("Renamed title")
+    );
 }
 
 #[test]

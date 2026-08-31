@@ -161,7 +161,7 @@ The reader contract is:
 - Review base: `8518acc4972f8a8a85b780aa428d511f68f3bf77`
 - [x] Task 1: Read OpenCode 1.x sessions into privacy-bounded display views.
 - [x] Task 2: Resolve OpenCode database configuration, CLI eligibility, authority, and conservative fallback binding.
-- [ ] Task 3: Integrate OpenCode metadata and automatic tab/pane labels without regressing existing agents.
+- [x] Task 3: Integrate OpenCode metadata and automatic tab/pane labels without regressing existing agents.
 - [ ] Task 4: Publish the OpenCode contract, complete independent review, and pass every repository validation gate.
 
 Implementation-time minor file changes or internal differences must be reflected in the relevant task. Ask the user before changing a requirement, Out of Scope item, or public contract.
@@ -333,6 +333,8 @@ Implementation-time minor file changes or internal differences must be reflected
 - Expected: all OpenCode metadata, authority, activity, failure, tab, and pane tests pass.
 - Run: `cargo test --test listener --locked`
 - Expected: the complete listener integration suite passes without existing-agent or lifecycle regressions.
+
+**Implementation record (2026-08-31):** Complete. The Red runtime seam showed OpenCode contributing its shared database path instead of `ses_runtime_one`; adding OpenCode to the existing session-ID contributor branch fixed both naming managers without backend-specific manager code. Eight synthetic SQLite listener scenarios cover mixed-agent reporting and official source scope, exact/streaming updates, same-session retention and replacement isolation, fresh fallback evidence after PID replacement, busy/malformed/unreadable no-refresh and healthy-pane continuation, authority/excluded-process clear retry, same-database pane override isolation, mixed visual-order tab behavior and ambiguity restoration, plus shared display bounds. Runtime identity has 1 focused test, OpenCode listener coverage has 8, the complete listener suite passes 73, the library suite passes 229, and all-target Clippy, format, and whitespace checks pass.
 
 ### Task 4: Public Contract, Review, and Release-Matrix Validation
 
