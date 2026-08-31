@@ -1,6 +1,6 @@
 # Repository guide
 
-`herdr-agent-context` is a Rust Herdr plugin that reads local Pi, Claude Code, and Codex JSONL sessions and reports privacy-bounded sidebar metadata.
+`herdr-agent-context` is a Rust Herdr plugin that reads local Pi, Claude Code, and Codex JSONL sessions plus OpenCode SQLite data and reports privacy-bounded sidebar metadata.
 
 ## Common commands
 
@@ -23,10 +23,11 @@ Run the focused Rust test first while developing, then run the full validation s
 
 ## Structure
 
-- `src/backend.rs`: shared static backend contracts and Pi/Claude/Codex registry.
+- `src/backend.rs`: shared static backend contracts and Pi/Claude/Codex/OpenCode registry.
 - `src/pi/`: Pi v3 JSONL parsing, discovery, and sticky binding.
 - `src/claude/`: branch-aware Claude JSONL parsing, bounded discovery, CLI eligibility, and conservative binding.
 - `src/codex/`: Codex rollout/index parsing, bounded discovery, CLI eligibility, and conservative binding.
+- `src/opencode/`: OpenCode 1.x SQLite parsing, database discovery, CLI eligibility, and conservative binding.
 - `src/herdr/`: protocol 19 values and Unix socket transport.
 - `src/runtime.rs`: reconciliation, TTL refresh/clear behavior, and runtime caches.
 - `src/tab_name/`: durable tab-label ownership, manual overrides, and crash recovery.
@@ -39,7 +40,8 @@ Read `README.md` for the public installation/configuration contract and `docs/re
 
 ## Implementation constraints
 
-- Keep Pi, Claude, and Codex parsing/resolution independent from Herdr transport. Backends are compiled into the static registry; do not add a dynamic ABI or external backend scripts.
+- Keep Pi, Claude, Codex, and OpenCode parsing/resolution independent from Herdr transport. Backends are compiled into the static registry; do not add a dynamic ABI or external backend scripts.
+- Open OpenCode databases read-only through bundled SQLite. Do not shell out to `sqlite3` or `opencode`, and do not use immutable mode because current activity may be in the WAL.
 - Herdr 0.8 raw RPC uses one socket connection per request. Keep the long-lived event subscription separate, subscribe before `agent.list`, and preserve events received before acknowledgement.
 - `pane.report_metadata` emits `pane_updated`. Do not let that event create a reporting loop or postpone the absolute polling deadline.
 - A failed session read/parse may retain in-memory display state, but it must not refresh metadata TTL. Retry transient metadata clears.
@@ -48,7 +50,7 @@ Read `README.md` for the public installation/configuration contract and `docs/re
 
 ## Testing and release rules
 
-- Use TDD for behavior changes. Add synthetic fixtures only; never commit real Pi/Claude/Codex conversations or user session paths.
+- Use TDD for behavior changes. Add synthetic fixtures only; never commit real Pi/Claude/Codex conversations, OpenCode databases, or user session paths.
 - Keep socket tests on temporary Unix sockets. Do not require a running user Herdr session in automated tests.
 - Shell scripts are POSIX `sh`; keep `shellcheck` and negative installer/archive tests passing.
 - `CHANGELOG.md` is the authored source of release changes. Use `scripts/release-notes.sh check|render|verify`, `scripts/prepare-release.sh X.Y.Z`, `scripts/validate-release-tag.sh vX.Y.Z COMMIT`, and `scripts/check-github-release.sh X.Y.Z BODY_FILE` rather than duplicating their contracts.

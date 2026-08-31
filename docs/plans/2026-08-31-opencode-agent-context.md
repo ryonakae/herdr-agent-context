@@ -360,6 +360,8 @@ Implementation-time minor file changes or internal differences must be reflected
 - Use only synthetic temporary database and fake-Herdr evidence. Do not inspect, copy, or validate against real OpenCode database rows, IDs, titles, prompts, assistant text, or integration state.
 - Keep the plan's task records current. Archive only after every Final Validation item succeeds.
 
+**Documentation record (2026-08-31):** Public and repository guidance now covers the optional Herdr integration, binding precedence and fork behavior, display/retention rules, root-TUI scope and exclusions, strict database configuration, XDG/`OPENCODE_DB` resolution, read-only SQLite privacy, conservative fallback, and the OpenCode 1.18.23 schema boundary. The plugin description includes OpenCode without changing version or released changelog history. `AGENTS.md` remains a 62-line repository entry point and adds only the new backend path, bundled read-only SQLite constraint, and synthetic-database privacy rule.
+
 **Test cases / checks:**
 - README examples and option table → exact `agents.opencode.database_paths`, XDG, `OPENCODE_DB`, supported modes, and limitations agree with code/tests.
 - `herdr-plugin.toml` → description includes OpenCode while version remains synchronized at the existing value.
