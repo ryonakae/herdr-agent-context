@@ -43,6 +43,7 @@ _2026-08-30_
 ## v99.0.0
 ### Unknown
 - Hidden in a fence.
+<!-- Literal comment opener in a fence.
 ```
 
 <!--
@@ -119,6 +120,33 @@ new_root unknown-category <<'EOF'
 EOF
 expect_fail "unknown category" env HERDR_AGENT_CONTEXT_ROOT="$TMP/unknown-category" "$SCRIPT" check 0.4.0
 
+new_root fenced-comment-ascending <<'EOF'
+# Changelog
+## v0.4.0
+### Added
+- Current release.
+```markdown
+<!-- Literal comment opener in a fence.
+```
+## v0.5.0
+### Fixed
+- Ascending release after the closed fence.
+EOF
+expect_fail "ascending version after fenced comment opener" env HERDR_AGENT_CONTEXT_ROOT="$TMP/fenced-comment-ascending" "$SCRIPT" check 0.4.0
+
+new_root fenced-comment-unknown <<'EOF'
+# Changelog
+## v0.4.0
+### Added
+- Current release.
+```markdown
+<!-- Literal comment opener in a fence.
+```
+### Improved
+- Unknown category after the closed fence.
+EOF
+expect_fail "unknown category after fenced comment opener" env HERDR_AGENT_CONTEXT_ROOT="$TMP/fenced-comment-unknown" "$SCRIPT" check 0.4.0
+
 new_root duplicate-category <<'EOF'
 # Changelog
 ## v0.4.0
@@ -162,6 +190,7 @@ _2026-08-30_
 ## v99.0.0
 ### Unknown
 - Hidden in a fence.
+<!-- Literal comment opener in a fence.
 ```
 
 <!--
@@ -202,6 +231,17 @@ expect_fail "text between blocks" env HERDR_AGENT_CONTEXT_ROOT="$TMP/valid" "$SC
 cat "$TMP/expected.md" >"$TMP/duplicated.md"
 printf '\n## Install\n\nDuplicate.\n' >>"$TMP/duplicated.md"
 expect_fail "duplicated mandatory block" env HERDR_AGENT_CONTEXT_ROOT="$TMP/valid" "$SCRIPT" verify 0.4.0 "$TMP/duplicated.md"
+
+for duplicate_heading in \
+    '## Install ' \
+    '## Validation ##' \
+    '   ## Release Notes' \
+    ' ## Full changelog ###' \
+    '# herdr-agent-context v0.4.0 #'; do
+    cp "$TMP/expected.md" "$TMP/equivalent-heading.md"
+    printf '\n%s\n\nDuplicate.\n' "$duplicate_heading" >>"$TMP/equivalent-heading.md"
+    expect_fail "Markdown-equivalent mandatory heading" env HERDR_AGENT_CONTEXT_ROOT="$TMP/valid" "$SCRIPT" verify 0.4.0 "$TMP/equivalent-heading.md"
+done
 
 sed 's/## Validation/## Checks/' "$TMP/expected.md" >"$TMP/changed.md"
 expect_fail "changed mandatory block" env HERDR_AGENT_CONTEXT_ROOT="$TMP/valid" "$SCRIPT" verify 0.4.0 "$TMP/changed.md"

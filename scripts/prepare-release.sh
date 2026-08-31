@@ -12,6 +12,12 @@ VERSION=$1
 CARGO="$ROOT/Cargo.toml"
 LOCK="$ROOT/Cargo.lock"
 PLUGIN="$ROOT/herdr-plugin.toml"
+MV_COMMAND=${HERDR_AGENT_CONTEXT_MV_COMMAND:-mv}
+TMP=
+COMMITTING=0
+CARGO_MODE=
+LOCK_MODE=
+PLUGIN_MODE=
 
 fail() {
     echo "prepare-release: $1" >&2
@@ -104,6 +110,30 @@ file_mode() {
     stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"
 }
 
+restore_originals() {
+    restore_failed=0
+    cp "$TMP/original-Cargo.toml" "$CARGO" || restore_failed=1
+    chmod "$CARGO_MODE" "$CARGO" || restore_failed=1
+    cp "$TMP/original-Cargo.lock" "$LOCK" || restore_failed=1
+    chmod "$LOCK_MODE" "$LOCK" || restore_failed=1
+    cp "$TMP/original-herdr-plugin.toml" "$PLUGIN" || restore_failed=1
+    chmod "$PLUGIN_MODE" "$PLUGIN" || restore_failed=1
+    return "$restore_failed"
+}
+
+cleanup() {
+    status=$?
+    trap - EXIT HUP INT TERM
+    if [ "$COMMITTING" -eq 1 ] && ! restore_originals; then
+        echo "prepare-release: could not restore original release files" >&2
+        status=1
+    fi
+    if [ -n "$TMP" ]; then
+        rm -rf "$TMP"
+    fi
+    exit "$status"
+}
+
 write_cargo() {
     awk -v version="$2" '
         /^\[package\]$/ { package = 1; print; next }
@@ -185,19 +215,35 @@ HERDR_AGENT_CONTEXT_ROOT="$ROOT" sh "$SCRIPTS/release-notes.sh" check "$VERSION"
     fail "CHANGELOG.md must contain $VERSION as its latest valid release"
 
 TMP=$(mktemp -d "$ROOT/.prepare-release.XXXXXX") || fail "could not create temporary directory"
-trap 'rm -rf "$TMP"' EXIT HUP INT TERM
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+CARGO_MODE=$(file_mode "$CARGO") || fail "could not read Cargo.toml mode"
+LOCK_MODE=$(file_mode "$LOCK") || fail "could not read Cargo.lock mode"
+PLUGIN_MODE=$(file_mode "$PLUGIN") || fail "could not read herdr-plugin.toml mode"
+cp "$CARGO" "$TMP/original-Cargo.toml" || fail "could not back up Cargo.toml"
+cp "$LOCK" "$TMP/original-Cargo.lock" || fail "could not back up Cargo.lock"
+cp "$PLUGIN" "$TMP/original-herdr-plugin.toml" || fail "could not back up herdr-plugin.toml"
+chmod "$CARGO_MODE" "$TMP/original-Cargo.toml" || fail "could not preserve Cargo.toml backup mode"
+chmod "$LOCK_MODE" "$TMP/original-Cargo.lock" || fail "could not preserve Cargo.lock backup mode"
+chmod "$PLUGIN_MODE" "$TMP/original-herdr-plugin.toml" || fail "could not preserve herdr-plugin.toml backup mode"
+
 write_cargo "$CARGO" "$VERSION" >"$TMP/Cargo.toml" || fail "could not prepare Cargo.toml"
 write_lock "$LOCK" "$VERSION" >"$TMP/Cargo.lock" || fail "could not prepare Cargo.lock"
 write_plugin "$PLUGIN" "$VERSION" >"$TMP/herdr-plugin.toml" || fail "could not prepare herdr-plugin.toml"
-chmod "$(file_mode "$CARGO")" "$TMP/Cargo.toml" || fail "could not preserve Cargo.toml mode"
-chmod "$(file_mode "$LOCK")" "$TMP/Cargo.lock" || fail "could not preserve Cargo.lock mode"
-chmod "$(file_mode "$PLUGIN")" "$TMP/herdr-plugin.toml" || fail "could not preserve herdr-plugin.toml mode"
+chmod "$CARGO_MODE" "$TMP/Cargo.toml" || fail "could not preserve Cargo.toml mode"
+chmod "$LOCK_MODE" "$TMP/Cargo.lock" || fail "could not preserve Cargo.lock mode"
+chmod "$PLUGIN_MODE" "$TMP/herdr-plugin.toml" || fail "could not preserve herdr-plugin.toml mode"
 
 [ "$(cargo_version "$TMP/Cargo.toml")" = "$VERSION" ] || fail "prepared Cargo.toml is invalid"
 [ "$(lock_version "$TMP/Cargo.lock")" = "$VERSION" ] || fail "prepared Cargo.lock is invalid"
 [ "$(plugin_version "$TMP/herdr-plugin.toml")" = "$VERSION" ] || fail "prepared herdr-plugin.toml is invalid"
 
-mv "$TMP/Cargo.toml" "$CARGO"
-mv "$TMP/Cargo.lock" "$LOCK"
-mv "$TMP/herdr-plugin.toml" "$PLUGIN"
+COMMITTING=1
+"$MV_COMMAND" "$TMP/Cargo.toml" "$CARGO" || fail "could not replace Cargo.toml"
+"$MV_COMMAND" "$TMP/Cargo.lock" "$LOCK" || fail "could not replace Cargo.lock"
+"$MV_COMMAND" "$TMP/herdr-plugin.toml" "$PLUGIN" || fail "could not replace herdr-plugin.toml"
+COMMITTING=0
 printf '%s\n' "$VERSION"

@@ -206,9 +206,36 @@ if grep -Eq 'gh (api|release view)' "$WORKFLOW"; then
     exit 1
 fi
 
-# Stable validation and rendered notes are prerequisites of every target build.
-grep -Fq "sh scripts/validate-release-tag.sh \"\$GITHUB_REF_NAME\" \"\$GITHUB_SHA\"" "$WORKFLOW"
-grep -Fq "sh scripts/release-notes.sh render \"\$version\" >release-notes.md" "$WORKFLOW"
+# Stable validation, repository gates, and rendered notes are prerequisites of every target build.
+awk '
+    /^  validate:$/ { in_validate = 1 }
+    in_validate && /^  [[:alnum:]_-]+:$/ && $0 != "  validate:" { exit }
+    in_validate { print }
+' "$WORKFLOW" >"$TMP/release-validate.yml"
+for command in \
+    'cargo fmt --check' \
+    'cargo clippy --all-targets -- -D warnings' \
+    'cargo test --all-targets --locked' \
+    'cargo build --release --locked' \
+    'shellcheck scripts/*.sh tests/*.sh' \
+    'actionlint .github/workflows/*.yml'; do
+    grep -Fq "$command" "$TMP/release-validate.yml" || {
+        echo "GitHub release test: release validate job does not run $command" >&2
+        exit 1
+    }
+done
+for test_script in release-notes prepare-release release-tag github-release installer release-assets; do
+    grep -Fq "sh tests/$test_script.sh" "$TMP/release-validate.yml" || {
+        echo "GitHub release test: release validate job does not run tests/$test_script.sh" >&2
+        exit 1
+    }
+done
+grep -Fq 'uses: dtolnay/rust-toolchain@stable' "$TMP/release-validate.yml"
+grep -Fq 'components: rustfmt, clippy' "$TMP/release-validate.yml"
+grep -Fq 'uses: Swatinem/rust-cache@v2' "$TMP/release-validate.yml"
+grep -Fq 'go install github.com/rhysd/actionlint/cmd/actionlint@' "$TMP/release-validate.yml"
+grep -Fq "sh scripts/validate-release-tag.sh \"\$GITHUB_REF_NAME\" \"\$GITHUB_SHA\"" "$TMP/release-validate.yml"
+grep -Fq "sh scripts/release-notes.sh render \"\$version\" >release-notes.md" "$TMP/release-validate.yml"
 grep -Eq '^  build:' "$WORKFLOW"
 grep -Eq '^    needs: validate$' "$WORKFLOW"
 

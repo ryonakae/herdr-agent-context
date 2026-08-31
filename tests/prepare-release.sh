@@ -70,6 +70,9 @@ snapshot() {
     cp "$directory/Cargo.toml" "$snapshot_directory/Cargo.toml"
     cp "$directory/Cargo.lock" "$snapshot_directory/Cargo.lock"
     cp "$directory/herdr-plugin.toml" "$snapshot_directory/herdr-plugin.toml"
+    file_mode "$directory/Cargo.toml" >"$snapshot_directory/Cargo.toml.mode"
+    file_mode "$directory/Cargo.lock" >"$snapshot_directory/Cargo.lock.mode"
+    file_mode "$directory/herdr-plugin.toml" >"$snapshot_directory/herdr-plugin.toml.mode"
 }
 
 assert_unchanged() {
@@ -78,6 +81,9 @@ assert_unchanged() {
     cmp "$snapshot_directory/Cargo.toml" "$directory/Cargo.toml"
     cmp "$snapshot_directory/Cargo.lock" "$directory/Cargo.lock"
     cmp "$snapshot_directory/herdr-plugin.toml" "$directory/herdr-plugin.toml"
+    test "$(file_mode "$directory/Cargo.toml")" = "$(cat "$snapshot_directory/Cargo.toml.mode")"
+    test "$(file_mode "$directory/Cargo.lock")" = "$(cat "$snapshot_directory/Cargo.lock.mode")"
+    test "$(file_mode "$directory/herdr-plugin.toml")" = "$(cat "$snapshot_directory/herdr-plugin.toml.mode")"
 }
 
 expect_failure_is_atomic() {
@@ -93,6 +99,42 @@ expect_failure_is_atomic() {
     assert_unchanged "$directory" "$snapshot_directory"
 }
 
+cat >"$TMP/failing-mv" <<'EOF'
+#!/bin/sh
+set -eu
+count=0
+if [ -f "$FAILING_MV_COUNT" ]; then
+    count=$(cat "$FAILING_MV_COUNT")
+fi
+count=$((count + 1))
+printf '%s\n' "$count" >"$FAILING_MV_COUNT"
+if [ "$count" -eq "$FAILING_MV_POSITION" ]; then
+    exit 1
+fi
+exec mv "$@"
+EOF
+chmod +x "$TMP/failing-mv"
+
+expect_replacement_failure_is_atomic() {
+    position=$1
+    description="replacement-$position"
+    directory="$TMP/$description"
+    new_root "$description"
+    snapshot "$directory" "$description"
+    snapshot_directory="$TMP/snapshot-$description"
+    : >"$TMP/$description.count"
+    if HERDR_AGENT_CONTEXT_ROOT="$directory" \
+        HERDR_AGENT_CONTEXT_MV_COMMAND="$TMP/failing-mv" \
+        FAILING_MV_COUNT="$TMP/$description.count" \
+        FAILING_MV_POSITION="$position" \
+        "$SCRIPT" 0.5.0 >"$TMP/$description.out" 2>"$TMP/$description.err"; then
+        echo "prepare release test: $description unexpectedly passed" >&2
+        exit 1
+    fi
+    test "$(cat "$TMP/$description.count")" -eq "$position"
+    assert_unchanged "$directory" "$snapshot_directory"
+}
+
 new_root valid
 HERDR_AGENT_CONTEXT_ROOT="$TMP/valid" "$SCRIPT" 0.5.0 >/dev/null
 
@@ -104,6 +146,10 @@ grep -Fqx 'version = "0.4.0"' "$TMP/valid/Cargo.lock"
 test "$(file_mode "$TMP/valid/Cargo.toml")" = 640
 test "$(file_mode "$TMP/valid/Cargo.lock")" = 600
 test "$(file_mode "$TMP/valid/herdr-plugin.toml")" = 644
+
+for position in 1 2 3; do
+    expect_replacement_failure_is_atomic "$position"
+done
 
 new_root invalid-version
 expect_failure_is_atomic invalid-version "$TMP/invalid-version" 0.5.0-rc.1

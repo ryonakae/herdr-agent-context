@@ -317,6 +317,8 @@ Implementation may reflect minor file changes in the relevant task. Ask the user
 - Use a read-only reviewer to inspect fail-closed behavior, rerun safety, shell portability, workflow permissions, and scope compliance.
 - Resolve all blocking/high findings and rerun focused tests after corrections.
 - Do not create tags, releases, or mutate Herdr/plugin state during validation.
+- One correction cycle resolved the four accepted blocking/high findings: fence/comment parser ordering, Markdown-equivalent trailing mandatory headings, workflow-backed validation claims, and rollback-safe release-file replacement.
+- Focused release-note, preparation, GitHub Release, and release-tag suites passed after correction, together with repository shellcheck, workflow actionlint, and `git diff --check`.
 
 **Test cases:**
 - Independent reviewer finds no unresolved blocking/high defect.

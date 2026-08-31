@@ -87,20 +87,27 @@ validate_changelog() {
             allowed["Removed"] = allowed["Fixed"] = allowed["Security"] = 1
         }
         {
-            line = strip_comments($0)
-            if (line ~ /^ {0,3}(```+|~~~+)/) {
-                marker = substr(line, match(line, /(```+|~~~+)/), RLENGTH)
-                character = substr(marker, 1, 1)
-                if (!in_fence) {
-                    in_fence = 1
-                    fence_character = character
-                    fence_length = length(marker)
-                } else if (character == fence_character && length(marker) >= fence_length) {
-                    in_fence = 0
+            if (in_fence) {
+                line = $0
+                if (line ~ /^ {0,3}(```+|~~~+)/) {
+                    marker = substr(line, match(line, /(```+|~~~+)/), RLENGTH)
+                    character = substr(marker, 1, 1)
+                    if (character == fence_character && length(marker) >= fence_length) {
+                        in_fence = 0
+                    }
                 }
                 next
             }
-            if (in_fence || line ~ /^[[:space:]]*$/) next
+
+            line = strip_comments($0)
+            if (line ~ /^ {0,3}(```+|~~~+)/) {
+                marker = substr(line, match(line, /(```+|~~~+)/), RLENGTH)
+                in_fence = 1
+                fence_character = substr(marker, 1, 1)
+                fence_length = length(marker)
+                next
+            }
+            if (line ~ /^[[:space:]]*$/) next
 
             if (line ~ /^## /) {
                 if (line !~ /^## v/) fail("invalid release heading " substr(line, 4))
@@ -191,21 +198,28 @@ release_body() {
         }
         {
             raw = $0
+            if (in_fence) {
+                if (raw ~ /^ {0,3}(```+|~~~+)/) {
+                    marker = substr(raw, match(raw, /(```+|~~~+)/), RLENGTH)
+                    character = substr(marker, 1, 1)
+                    if (character == fence_character && length(marker) >= fence_length) {
+                        in_fence = 0
+                    }
+                }
+                if (found) emit(raw)
+                next
+            }
+
             visible = strip_comments(raw)
-            structural = !in_fence
             if (visible ~ /^ {0,3}(```+|~~~+)/) {
                 marker = substr(visible, match(visible, /(```+|~~~+)/), RLENGTH)
-                character = substr(marker, 1, 1)
-                if (!in_fence) {
-                    structural = 0
-                    in_fence = 1
-                    fence_character = character
-                    fence_length = length(marker)
-                } else if (character == fence_character && length(marker) >= fence_length) {
-                    in_fence = 0
-                }
+                in_fence = 1
+                fence_character = substr(marker, 1, 1)
+                fence_length = length(marker)
+                if (found) emit(raw)
+                next
             }
-            if (structural && visible ~ /^## v/) {
+            if (visible ~ /^## v/) {
                 version = substr(visible, 5)
                 if (found) exit
                 if (version == target) found = 1
@@ -242,21 +256,27 @@ previous_version() {
             }
         }
         {
+            if (in_fence) {
+                line = $0
+                if (line ~ /^ {0,3}(```+|~~~+)/) {
+                    marker = substr(line, match(line, /(```+|~~~+)/), RLENGTH)
+                    character = substr(marker, 1, 1)
+                    if (character == fence_character && length(marker) >= fence_length) {
+                        in_fence = 0
+                    }
+                }
+                next
+            }
+
             line = strip_comments($0)
-            structural = !in_fence
             if (line ~ /^ {0,3}(```+|~~~+)/) {
                 marker = substr(line, match(line, /(```+|~~~+)/), RLENGTH)
-                character = substr(marker, 1, 1)
-                if (!in_fence) {
-                    structural = 0
-                    in_fence = 1
-                    fence_character = character
-                    fence_length = length(marker)
-                } else if (character == fence_character && length(marker) >= fence_length) {
-                    in_fence = 0
-                }
+                in_fence = 1
+                fence_character = substr(marker, 1, 1)
+                fence_length = length(marker)
+                next
             }
-            if (structural && line ~ /^## v/) {
+            if (line ~ /^## v/) {
                 version = substr(line, 5)
                 if (seen_target) {
                     print version
@@ -323,7 +343,72 @@ verify_notes() {
     if [ "$actual_size" -gt "$expected_size" ]; then
         dd if="$body_file" of="$tmp/trailing" bs=1 skip="$expected_size" 2>/dev/null
         first=$(dd if="$tmp/trailing" bs=1 count=1 2>/dev/null || true)
-        if [ -n "$first" ] || grep -Eq '^# herdr-agent-context v|^## (Release Notes|Install|Validation|Full changelog)$' "$tmp/trailing"; then
+        if [ -n "$first" ] || awk -v title="herdr-agent-context v$version" '
+            function strip_comments(line, start, finish, before, after) {
+                while (1) {
+                    if (in_comment) {
+                        finish = index(line, "-->")
+                        if (!finish) return ""
+                        line = substr(line, finish + 3)
+                        in_comment = 0
+                        continue
+                    }
+                    start = index(line, "<!--")
+                    if (!start) return line
+                    before = substr(line, 1, start - 1)
+                    after = substr(line, start + 4)
+                    finish = index(after, "-->")
+                    if (finish) {
+                        line = before substr(after, finish + 3)
+                        continue
+                    }
+                    in_comment = 1
+                    return before
+                }
+            }
+            function reserved_heading(line, indentation, content, level, i) {
+                match(line, /^ */)
+                indentation = RLENGTH
+                if (indentation > 3) return 0
+                line = substr(line, indentation + 1)
+                if (substr(line, 1, 1) != "#") return 0
+                level = 0
+                for (i = 1; substr(line, i, 1) == "#"; i++) level += 1
+                if (level > 6) return 0
+                if (substr(line, level + 1, 1) !~ /[[:space:]]/ && length(line) > level) return 0
+                content = substr(line, level + 1)
+                sub(/^[[:space:]]+/, "", content)
+                sub(/[[:space:]]+$/, "", content)
+                sub(/[[:space:]]+#+$/, "", content)
+                sub(/[[:space:]]+$/, "", content)
+                return (level == 1 && content == title) ||
+                    (level == 2 && (content == "Release Notes" || content == "Install" ||
+                    content == "Validation" || content == "Full changelog"))
+            }
+            {
+                if (in_fence) {
+                    line = $0
+                    if (line ~ /^ {0,3}(```+|~~~+)/) {
+                        marker = substr(line, match(line, /(```+|~~~+)/), RLENGTH)
+                        character = substr(marker, 1, 1)
+                        if (character == fence_character && length(marker) >= fence_length) {
+                            in_fence = 0
+                        }
+                    }
+                    next
+                }
+                line = strip_comments($0)
+                if (line ~ /^ {0,3}(```+|~~~+)/) {
+                    marker = substr(line, match(line, /(```+|~~~+)/), RLENGTH)
+                    in_fence = 1
+                    fence_character = substr(marker, 1, 1)
+                    fence_length = length(marker)
+                    next
+                }
+                if (reserved_heading(line)) found = 1
+            }
+            END { exit !found }
+        ' "$tmp/trailing"; then
             echo "GitHub Release v$version: invalid operator notes after required release content" >&2
             return 1
         fi

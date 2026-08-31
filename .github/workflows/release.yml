@@ -17,8 +17,30 @@ jobs:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install workflow linter
+        run: |
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+          echo "$(go env GOPATH)/bin" >>"$GITHUB_PATH"
       - name: Validate stable release tag
         run: sh scripts/validate-release-tag.sh "$GITHUB_REF_NAME" "$GITHUB_SHA"
+      - name: Validate repository and release contracts
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
+          cargo test --all-targets --locked
+          cargo build --release --locked
+          sh tests/release-notes.sh
+          sh tests/prepare-release.sh
+          sh tests/release-tag.sh
+          sh tests/github-release.sh
+          sh tests/installer.sh
+          sh tests/release-assets.sh
+          shellcheck scripts/*.sh tests/*.sh
+          actionlint .github/workflows/*.yml
       - name: Render deterministic release notes
         run: |
           set -eu
