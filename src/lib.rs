@@ -3,6 +3,7 @@ pub mod claude;
 pub mod codex;
 pub mod config;
 pub mod herdr;
+pub mod opencode;
 pub mod pane_name;
 pub mod pi;
 pub mod runtime;
