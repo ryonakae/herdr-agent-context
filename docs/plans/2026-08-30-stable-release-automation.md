@@ -106,7 +106,7 @@ Establish a tested stable-release process in which `CHANGELOG.md` is the source 
 - [x] Task 1: Establish changelog and deterministic release-note contracts.
 - [x] Task 2: Add atomic release preparation and stable-tag validation.
 - [x] Task 3: Convert CI and publication workflow to tested stable releases.
-- [ ] Task 4: Make release operations reusable and document the new process.
+- [x] Task 4: Make release operations reusable and document the new process.
 - [ ] Task 5: Complete independent review and full validation.
 
 Implementation may reflect minor file changes in the relevant task. Ask the user before changing requirements, Out of Scope, or public contracts.
@@ -288,6 +288,12 @@ Implementation may reflect minor file changes in the relevant task. Ask the user
 **Complete when:**
 - A maintainer can prepare and verify a future release without editing test fixtures or procedural version literals.
 - AGENTS and checklist agree on ownership and commands.
+
+**Implementation outcome:**
+- Replaced the reusable checklist with a `VERSION`/`TAG`-driven stable-release procedure covering authored changelog notes, atomic preparation, local gates, exact-SHA CI artifact checks, approval, annotated tagging, publication verification, and managed-plugin update.
+- Documented fail-closed rerun recovery, retained optional live smoke with synthetic/privacy constraints and dynamic baseline variables, and preserved the immutable prerelease evidence records byte-for-byte.
+- Documented the changelog ownership and release automation commands in `AGENTS.md`; `README.md` did not require a public install-contract change.
+- Focused documentation validation passed: command-contract search, reusable-section version-literal check, immutable-record comparison, and `git diff --check`.
 
 **Validation:**
 - Run: `rg -n 'prepare-release|release-notes|validate-release-tag|CHANGELOG' AGENTS.md docs/release-checklist.md`

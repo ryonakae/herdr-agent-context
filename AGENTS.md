@@ -11,6 +11,10 @@ cargo clippy --all-targets -- -D warnings
 cargo build --release --locked
 sh tests/installer.sh
 sh tests/release-assets.sh
+sh tests/release-notes.sh
+sh tests/prepare-release.sh
+sh tests/release-tag.sh
+sh tests/github-release.sh
 actionlint .github/workflows/*.yml
 shellcheck scripts/*.sh tests/*.sh
 ```
@@ -27,7 +31,7 @@ Run the focused Rust test first while developing, then run the full validation s
 - `src/runtime.rs`: reconciliation, TTL refresh/clear behavior, and runtime caches.
 - `src/tab_name/`: durable tab-label ownership, manual overrides, and crash recovery.
 - `src/main.rs`: listener lifecycle, polling deadline, reconnect backoff, and socket-scoped lock.
-- `scripts/`: binary installer and release-contract checks.
+- `scripts/`: binary installer, changelog/release-note, version-preparation, tag-validation, and GitHub Release contract checks.
 - `tests/listener.rs`: fake socket, runtime, reconnect, and duplicate-listener integration tests.
 - `docs/release-checklist.md`: manual Herdr smoke and release promotion gates.
 
@@ -47,8 +51,9 @@ Read `README.md` for the public installation/configuration contract and `docs/re
 - Use TDD for behavior changes. Add synthetic fixtures only; never commit real Pi/Claude/Codex conversations or user session paths.
 - Keep socket tests on temporary Unix sockets. Do not require a running user Herdr session in automated tests.
 - Shell scripts are POSIX `sh`; keep `shellcheck` and negative installer/archive tests passing.
-- Keep package/plugin versions synchronized and the non-publishing four-target matrix green. Follow `docs/release-checklist.md` for packaging changes.
-- Do not create tags or publish releases unless explicitly requested. Do not commit generated `bin/`, `target/`, or `dist/` content.
+- `CHANGELOG.md` is the authored source of release changes. Use `scripts/release-notes.sh check|render|verify`, `scripts/prepare-release.sh X.Y.Z`, `scripts/validate-release-tag.sh vX.Y.Z COMMIT`, and `scripts/check-github-release.sh X.Y.Z BODY_FILE` rather than duplicating their contracts.
+- Keep package/plugin versions synchronized and the non-publishing four-target matrix green. Stable `vX.Y.Z` tags drive the Release workflow; follow `docs/release-checklist.md` for preparation, exact-SHA CI, approval, publication verification, and managed-plugin update.
+- Do not create, move, delete, or overwrite tags or releases unless explicitly requested. Do not manually create a release or tag outside the documented, requested promotion procedure. Do not commit generated `bin/`, `target/`, or `dist/` content.
 
 ## Documentation
 

@@ -1,368 +1,154 @@
 # Release checklist
 
-Run this checklist from a clean checkout before promoting the `v0.4.0` prerelease. Use synthetic prompts and a disposable named Herdr session. Do not read or copy real transcripts into release evidence.
+Use this procedure for each future stable release. `CHANGELOG.md` is the authored source of release changes; generated GitHub Release notes are derived from it. Historical releases through `v0.4.0` remain prereleases and must not be changed. The next release and later releases use the stable policy.
 
-## Automated gates
+Run only from a clean local `main` checkout. Do not read or copy real transcripts into release evidence; use synthetic prompts, synthetic fixtures, and a disposable named Herdr session only.
 
-- [x] `cargo fmt --check`
-- [x] `cargo clippy --all-targets -- -D warnings`
-- [x] `cargo test --all-targets --locked`
-- [x] `cargo build --release --locked`
-- [x] `sh scripts/verify-version.sh v0.4.0`
-- [x] `sh tests/installer.sh`
-- [x] `sh tests/release-assets.sh`
-- [x] `shellcheck scripts/*.sh tests/*.sh`
-- [x] `actionlint .github/workflows/*.yml`
-- [x] `git diff --check`
-- [x] The nonpublishing CI quality job and all four target jobs passed for the proposed release SHA.
-- [x] Downloaded CI archives passed `scripts/verify-release-assets.sh 0.4.0 <dist>`.
-- [x] Both Linux archives passed `scripts/verify-glibc-baseline.sh <binary> 2.18`.
+## Release identity
 
-## Evidence and source plugin setup
-
-Open one dedicated validation shell and keep it open through source setup, integration installation, and final cleanup. Paste the fenced commands into that shell in order; do not run a fenced block as a standalone script or subshell because the cleanup functions and traps must persist. Use a second terminal only for the named Herdr TUI and pane commands, exporting the same evidence-directory path there.
-
-Use one directory outside the repository for pane IDs, checksums, run IDs, and redacted `agent.list` results:
+Choose the version explicitly; `scripts/prepare-release.sh` does not infer SemVer impact.
 
 ```sh
 set -eu
-export AGENT_CONTEXT_EVIDENCE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/agent-context-v040-evidence.XXXXXX")
-printf '%s\n' "$(git rev-parse HEAD)" > "$AGENT_CONTEXT_EVIDENCE_DIR/release-sha.txt"
-test -z "$(git status --porcelain)"
-test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
+VERSION=X.Y.Z
+TAG=v$VERSION
+plugin_before=$(herdr plugin list --plugin ryonakae.agent-context --json)
+BASELINE_VERSION=$(printf '%s\n' "$plugin_before" | jq -er '
+  .result.plugins | if length == 1 then .[0].version else error("expected one managed plugin") end')
+BASELINE_REF=$(printf '%s\n' "$plugin_before" | jq -er '
+  .result.plugins[0].source |
+  if .kind == "github" and (.requested_ref | type) == "string" then .requested_ref
+  else error("expected one managed GitHub plugin") end')
+unset plugin_before
+export AGENT_CONTEXT_EVIDENCE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/agent-context-${VERSION}-evidence.XXXXXX")
 ```
 
-Record the existing plugin state, build the same clean SHA, then replace the managed v0.3.0 installation with a source link:
+## Prepare the release commit
+
+- [ ] Confirm `git status --porcelain` is empty and `HEAD` equals `origin/main`.
+- [ ] Author the latest `CHANGELOG.md` section for `$TAG` with reviewed, user-visible changes.
+- [ ] Check and preview the deterministic notes before changing release-owned versions:
 
 ```sh
-set -eu
-evidence=${AGENT_CONTEXT_EVIDENCE_DIR:?}
-herdr plugin list --plugin ryonakae.agent-context --json > "$evidence/plugin-before.json"
-jq -e '.result.plugins | length == 1 and .[0].enabled == true and
-  .[0].version == "0.3.0" and .[0].source.kind == "github" and
-  .[0].source.requested_ref == "v0.3.0"' "$evidence/plugin-before.json" >/dev/null
-restore_plugin_baseline() {
-  herdr plugin unlink ryonakae.agent-context >/dev/null 2>&1 || true
-  herdr plugin install ryonakae/herdr-agent-context --ref v0.3.0 --yes >/dev/null
-  herdr plugin list --plugin ryonakae.agent-context --json | jq -e '
-    .result.plugins | length == 1 and .[0].enabled == true and
-    .[0].version == "0.3.0" and .[0].source.kind == "github" and
-    .[0].source.requested_ref == "v0.3.0"' >/dev/null
-}
-cleanup_validation() { restore_plugin_baseline; }
-trap 'cleanup_validation || { echo "plugin restoration failed; evidence: $evidence" >&2; exit 1; }' EXIT
-trap 'exit 130' HUP INT TERM
+sh scripts/release-notes.sh check "$VERSION"
+sh scripts/release-notes.sh render "$VERSION" > "$AGENT_CONTEXT_EVIDENCE_DIR/$TAG-notes.md"
+```
+
+- [ ] Synchronize the package, lockfile, and managed-plugin versions:
+
+```sh
+sh scripts/prepare-release.sh "$VERSION"
+sh scripts/release-notes.sh check "$VERSION"
+git diff -- Cargo.toml Cargo.lock herdr-plugin.toml CHANGELOG.md
+```
+
+- [ ] Run all local gates:
+
+```sh
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test --all-targets --locked
 cargo build --release --locked
-mkdir -p bin
-cp target/release/herdr-agent-context bin/.herdr-agent-context.new
-chmod 755 bin/.herdr-agent-context.new
-mv bin/.herdr-agent-context.new bin/herdr-agent-context
-if ! herdr plugin unlink ryonakae.agent-context || ! herdr plugin link .; then
-  restore_plugin_baseline
-  trap - EXIT HUP INT TERM
-  exit 1
-fi
-herdr plugin list --plugin ryonakae.agent-context --json | jq -e '
-  .result.plugins | length == 1 and .[0].enabled == true and
-  .[0].version == "0.4.0" and .[0].source.kind == "local"' >/dev/null
+sh tests/release-notes.sh
+sh tests/prepare-release.sh
+sh tests/release-tag.sh
+sh tests/github-release.sh
+sh tests/installer.sh
+sh tests/release-assets.sh
+shellcheck scripts/*.sh tests/*.sh
+actionlint .github/workflows/*.yml
+git diff --check
 ```
 
-- [ ] `herdr plugin list --plugin ryonakae.agent-context --json` reports one enabled local `0.4.0` plugin.
-- [ ] No second `herdr-agent-context listen` process is running for the same socket.
-- [ ] Any code or tracked documentation change found during smoke invalidated this evidence directory and restarted validation from a new clean SHA.
-
-## Disposable Herdr session
-
-Create a temporary Herdr configuration that contains the README's shared agent sidebar rows. From a separate terminal, launch or attach the named session:
+- [ ] Commit the reviewed release-owned changes and push that commit to `main`. Record its immutable SHA:
 
 ```sh
-HERDR_CONFIG_PATH="$AGENT_CONTEXT_EVIDENCE_DIR/herdr-config.toml" \
-  herdr --session agent-context-v040
+RELEASE_SHA=$(git rev-parse HEAD)
+git push origin main
+test "$RELEASE_SHA" = "$(git rev-parse origin/main)"
+printf '%s\n' "$RELEASE_SHA" > "$AGENT_CONTEXT_EVIDENCE_DIR/release-sha.txt"
 ```
 
-Run the remaining pane commands from a shell inside that session. Parse every pane ID from the JSON response instead of predicting it:
+## Exact-SHA CI and approval
+
+- [ ] Wait for the nonpublishing CI quality job and all four target jobs for `$RELEASE_SHA`, not merely the latest branch run.
+- [ ] Download and validate that exact run's artifacts:
 
 ```sh
-pi_pane=$(herdr pane split --current --direction right --cwd "$PWD" --no-focus \
-  | jq -er '.result.pane.pane_id')
-claude_pane=$(herdr pane split --current --direction down --cwd "$PWD" --no-focus \
-  | jq -er '.result.pane.pane_id')
-codex_pane=$(herdr pane split --pane "$pi_pane" --direction down --cwd "$PWD" --no-focus \
-  | jq -er '.result.pane.pane_id')
-printf '%s\n' "$pi_pane" > "$AGENT_CONTEXT_EVIDENCE_DIR/pi-pane-id.txt"
-printf '%s\n' "$claude_pane" > "$AGENT_CONTEXT_EVIDENCE_DIR/claude-pane-id.txt"
-printf '%s\n' "$codex_pane" > "$AGENT_CONTEXT_EVIDENCE_DIR/codex-pane-id.txt"
-herdr agent start context_pi --kind pi --pane "$pi_pane"
-herdr agent start context_claude --kind claude --pane "$claude_pane" -- --name agent-context-smoke
-herdr agent start context_codex --kind codex --pane "$codex_pane"
-```
-
-Use synthetic prompts only:
-
-```sh
-herdr agent prompt context_pi "Reply with a short synthetic Pi status." --wait --timeout 120000
-herdr agent prompt context_claude "Reply with a short synthetic Claude status." --wait --timeout 120000
-herdr agent prompt context_codex "Reply with a short synthetic Codex status." --wait --timeout 120000
-```
-
-## Hook-free sidebar behavior
-
-### Pi
-
-- [ ] An unnamed session uses the first user text, then cwd basename, as the name fallback.
-- [ ] An explicit Pi session name replaces the fallback within one poll interval.
-- [ ] The latest assistant text appears without added surrounding quotes.
-- [ ] A new user entry retains prior activity until the next assistant text arrives.
-- [ ] `/new` and `/resume` update a single-pane sticky binding without showing another cwd's transcript.
-- [ ] Two same-cwd Pi panes keep established bindings stable.
-- [ ] A visible `--no-session` process clears both plugin-owned tokens.
-
-### Claude Code
-
-- [ ] Current `customTitle` and legacy `title` records take precedence over the latest matching `ai-title`.
-- [ ] Without a matching custom or AI title, the session-name token stays empty even when first-user text and cwd exist.
-- [ ] A matching normalized terminal title is accepted; a missing or mismatched terminal title falls back to the verified JSONL title.
-- [ ] Live (not run in this review): a newly started Claude session without a custom or AI title leaves the existing tab baseline unchanged.
-- [ ] The latest top-level assistant text after the latest human entry appears without added surrounding quotes.
-- [ ] Thinking, tool activity, tool results, sidechains, API errors, and abandoned branches never appear.
-- [ ] A new human entry retains prior activity; switching to another session does not carry it across.
-- [ ] `--session-id <uuid>` or UUID `--resume` binds the exact local file without claiming an official source.
-- [ ] Resume by name and `--continue` use local fallback rather than direct identity.
-- [ ] `--print`, `--background`, and `--no-session-persistence` leave the plugin rows empty.
-- [ ] Two same-project Claude panes on a hook-free cold start stay empty without direct evidence.
-- [ ] Established same-project sticky bindings do not reshuffle after unrelated file activity.
-- [ ] A bound incomplete tail does not switch to an older candidate or refresh TTL; repair restores the same binding.
-
-### Codex
-
-- [ ] The latest nonblank exact-ID `thread_name` wins, followed by first genuine user text and cwd basename fallbacks.
-- [ ] The latest commentary or final assistant text appears; reasoning, system/developer records, tools, completion echoes, and nontext content never appear.
-- [ ] A new genuine user message retains prior activity for the same session; switching identity never carries it across.
-- [ ] An official ID binds exactly and reports the matching source; UUID `resume` binds exactly without claiming an official source.
-- [ ] Normal starts wait for one uniquely new or changed same-cwd rollout after pane observation; a cold listener does not attach an old transcript.
-- [ ] Targetless, named, `--last`, and UUID resume remain interactive; fork binds only after the child identity becomes observable.
-- [ ] `exec`, review, remote, ephemeral, subagent, internal, MCP, app-server, and non-root sources leave plugin rows empty.
-- [ ] Multiple same-cwd Codex panes or multiple changed candidates remain empty without official or exact evidence.
-- [ ] A bound partial or completed structurally invalid rollout does not refresh TTL; repair restores the same identity.
-- [ ] An index-only rename refreshes sidebar, tab, and pane labels; a malformed completed index entry falls back without suppressing valid rollout activity.
-
-### Shared behavior
-
-- [ ] Multiline values stay on one row; exactly 80 scalars remain unchanged and longer values truncate to 79 scalars plus an ellipsis.
-- [ ] Sidebar and tab-component bounds derive independently from one complete title; a grapheme over 80 scalars stays intact when it fits the 20-column component limit.
-- [ ] Stopping the listener lets metadata expire after TTL; restart performs a full sync.
-- [ ] Replacing a pane terminal identity clears the prior terminal's owned metadata.
-- [ ] Socket disconnect/reconnect performs a new full sync with a fresh sequence epoch.
-- [ ] Invalid plugin config keeps the previous timing and all three agents' roots.
-- [ ] Plugin logs contain no synthetic title, prompt, or assistant text.
-
-## Optional tab and pane label behavior
-
-Keep the default-off check separate from the opt-in checks. For the opt-in smoke, back up the plugin's `config.toml`, enable `[tab_name]` and `[pane_name]` independently and together, then restore the exact original file before cleanup. Use only the disposable named session and synthetic agents created above. If the live smoke is not applicable, leave its boxes unchecked and record the reason; automated coverage does not count as an executed live check.
-
-Current v0.4.0 review status: live source and integration smoke was not run because named sessions share the global Herdr plugin registry, and replacing it with the unreleased build would mutate the active user's plugin state. Promotion proceeded after explicit user acceptance of this residual risk on 2026-08-30; automated and exact-SHA distribution coverage do not count as live smoke.
-
-- [ ] With both naming tables omitted, the listener sends no `session.snapshot`, `tab.rename`, or `pane.rename` request and naming-only events do not refresh metadata.
-- [ ] Generated components use the Pi or Codex name or verified Claude title, preserve grapheme clusters, and occupy at most 20 terminal columns; the aggregate retains every component joined with ` + `.
-- [ ] Background tabs follow visual pane order (top to bottom, then left to right); focus changes cause no rename and do not move the absolute poll deadline.
-- [ ] Shell, unsupported, and untitled panes contribute nothing without hiding resolved panes in the same tab.
-- [ ] A manual rename suppresses only the current ordered session composition. Another composition can acquire the tab, and returning restores the exact manual label.
-- [ ] Pane moves recompute source and destination aggregates while keeping baselines and overrides tab-local. Closing a tab removes its ownership state.
-- [ ] Each generated pane label uses its own 20-column session title; manual rename and clear override only that pane's current session and never change the tab aggregate.
-- [ ] Pane session and terminal replacement, move, close, listener restart, and `[pane_name] enabled = false` restore or recompute the exact owned label.
-- [ ] Setting either naming feature to `false` restores its latest baseline. An inferred numeric tab baseline uses the current workspace-local position after reordering.
-- [ ] Pane and tab state failures disable only their own synchronizer without blocking the other synchronizer or sidebar metadata. State files contain manual labels but no plaintext generated title, session identity, terminal/binding generation, or socket path.
-- [ ] Live (not run in this review): Pi, Claude, and Codex generated/custom labels, focus switching, shell retention, manual override, config disable, and listener restart match the rules above in an isolated disposable Herdr session.
-- [ ] Live (not run in this review): after the selected Pi process exits, the tab recomputes from any remaining resolved components; it restores the exact baseline only when no resolved component remains.
-- [ ] Live (not run in this review): force-stopping the listener leaves the generated custom label; restarting and then setting `enabled = false` restores the saved numeric baseline.
-- [ ] Live cleanup (not applicable because the smoke was not run): remove the listener, synthetic agents and transcripts, temporary pane, isolated server, state/config directories, and disposable session.
-
-## Temporary official integrations
-
-Run these checks only after hook-free behavior passes. Return to the persistent validation shell from the setup section; do not run this block in the disposable pane shell. The validation shell must use the same `PI_CODING_AGENT_DIR`, `CLAUDE_CONFIG_DIR`, and `CODEX_HOME` as the test agents.
-
-```sh
-set -eu
-evidence=${AGENT_CONTEXT_EVIDENCE_DIR:?}
-pi_dir=${PI_CODING_AGENT_DIR:-"$HOME/.pi/agent"}
-claude_dir=${CLAUDE_CONFIG_DIR:-"$HOME/.claude"}
-codex_dir=${CODEX_HOME:-"$HOME/.codex"}
-pi_hook="$pi_dir/extensions/herdr-agent-state.ts"
-claude_settings="$claude_dir/settings.json"
-claude_hook="$claude_dir/hooks/herdr-agent-state.sh"
-codex_settings="$codex_dir/config.toml"
-codex_hook="$codex_dir/herdr-agent-state.sh"
-sha256_file() {
-  if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$1" | awk '{print $1}'
-  else
-    shasum -a 256 "$1" | awk '{print $1}'
-  fi
-}
-file_state() {
-  for path in "$@"; do
-    if [ -L "$path" ]; then
-      printf 'L\t%s\t%s\t' "$path" "$(readlink "$path")"
-      sha256_file "$path"
-    elif [ -f "$path" ]; then
-      printf 'F\t%s\t' "$path"
-      sha256_file "$path"
-    elif [ -e "$path" ]; then
-      printf 'UNSUPPORTED\t%s\n' "$path"; return 1
-    else
-      printf 'MISSING\t%s\n' "$path"
-    fi
-  done
-}
-backup_file() {
-  path=$1
-  if [ -e "$path" ] || [ -L "$path" ]; then
-    mkdir -p "$evidence/backup$(dirname "$path")"
-    cp -a "$path" "$evidence/backup$path"
-  fi
-}
-herdr integration status > "$evidence/integration-status-before.txt"
-grep -q '^pi: not installed ' "$evidence/integration-status-before.txt"
-grep -q '^claude: not installed ' "$evidence/integration-status-before.txt"
-grep -q '^codex: not installed ' "$evidence/integration-status-before.txt"
-file_state "$pi_hook" "$claude_settings" "$claude_hook" "$codex_settings" "$codex_hook" > "$evidence/files-before.txt"
-backup_file "$pi_hook"
-backup_file "$claude_settings"
-backup_file "$claude_hook"
-backup_file "$codex_settings"
-backup_file "$codex_hook"
-cleanup_integrations() {
-  cleanup_status=0
-  herdr integration uninstall codex >/dev/null 2>&1 || true
-  herdr integration uninstall claude >/dev/null 2>&1 || true
-  herdr integration uninstall pi >/dev/null 2>&1 || true
-  file_state "$pi_hook" "$claude_settings" "$claude_hook" "$codex_settings" "$codex_hook" > "$evidence/files-after.txt" || cleanup_status=1
-  cmp "$evidence/files-before.txt" "$evidence/files-after.txt" || cleanup_status=1
-  herdr integration status > "$evidence/integration-status-after.txt" || cleanup_status=1
-  grep -q '^pi: not installed ' "$evidence/integration-status-after.txt" || cleanup_status=1
-  grep -q '^claude: not installed ' "$evidence/integration-status-after.txt" || cleanup_status=1
-  grep -q '^codex: not installed ' "$evidence/integration-status-after.txt" || cleanup_status=1
-  return "$cleanup_status"
-}
-cleanup_validation() {
-  cleanup_status=0
-  cleanup_integrations || cleanup_status=1
-  restore_plugin_baseline || cleanup_status=1
-  return "$cleanup_status"
-}
-trap 'cleanup_validation || { echo "integration/plugin restoration failed; evidence: $evidence" >&2; exit 1; }' EXIT
-trap 'exit 130' HUP INT TERM
-herdr integration install pi
-herdr integration install claude
-herdr integration install codex
-```
-
-- [ ] `herdr integration status` reports Pi, Claude, and Codex as `current`.
-- [ ] Restart fresh synthetic Pi, Claude, and Codex sessions so all integrations initialize.
-- [ ] Pi reports `kind=path`; Claude and Codex report `kind=id`; all values are nonempty.
-- [ ] Metadata reports use `applies_to_source=herdr:pi`, `herdr:claude`, or `herdr:codex` for the matching pane.
-- [ ] A newer same-cwd fallback cannot replace an authoritative session.
-- [ ] Missing or malformed authoritative targets do not fall back and do not refresh TTL.
-- [ ] Native Pi, Claude, and Codex resume keep the exact context after restarting the disposable named session.
-
-In a shell inside the disposable named session, export the same `AGENT_CONTEXT_EVIDENCE_DIR` path and save only identity shape, not identity values or metadata tokens:
-
-```sh
-set -eu
-evidence=${AGENT_CONTEXT_EVIDENCE_DIR:?}
-pi_pane_id=$(cat "$evidence/pi-pane-id.txt")
-claude_pane_id=$(cat "$evidence/claude-pane-id.txt")
-codex_pane_id=$(cat "$evidence/codex-pane-id.txt")
-agent_json=$(herdr agent list)
-printf '%s\n' "$agent_json" | jq --arg pi "$pi_pane_id" --arg claude "$claude_pane_id" --arg codex "$codex_pane_id" '
-  [.result.agents[] | select(.pane_id == $pi or .pane_id == $claude or .pane_id == $codex) |
-    {pane_id, agent, session_source:.agent_session.source,
-     session_kind:.agent_session.kind,
-     identity_nonempty: ((.agent_session.value | type) == "string" and
-                         (.agent_session.value | length) > 0)}]
-' > "$evidence/agent-authority-redacted.json"
-unset agent_json
-jq -e --arg pane "$pi_pane_id" '
-  [.[] | select(.pane_id == $pane and .agent == "pi")] |
-  length == 1 and .[0].session_kind == "path" and
-  .[0].session_source == "herdr:pi" and .[0].identity_nonempty == true
-' "$evidence/agent-authority-redacted.json" >/dev/null
-jq -e --arg pane "$claude_pane_id" '
-  [.[] | select(.pane_id == $pane and .agent == "claude")] |
-  length == 1 and .[0].session_kind == "id" and
-  .[0].session_source == "herdr:claude" and .[0].identity_nonempty == true
-' "$evidence/agent-authority-redacted.json" >/dev/null
-jq -e --arg pane "$codex_pane_id" '
-  [.[] | select(.pane_id == $pane and .agent == "codex")] |
-  length == 1 and .[0].session_kind == "id" and
-  .[0].session_source == "herdr:codex" and .[0].identity_nonempty == true
-' "$evidence/agent-authority-redacted.json" >/dev/null
-```
-
-Return to the persistent validation shell. Uninstall all three integrations, restore the managed plugin, and compare the exact preinstall state. Do not overwrite a mismatch from the backup:
-
-```sh
-if ! cleanup_validation; then
-  trap - EXIT HUP INT TERM
-  echo "integration/plugin restoration failed; evidence: $evidence" >&2
-  exit 1
-fi
-trap - EXIT HUP INT TERM
-```
-
-- [ ] File presence, link targets, and checksums match exactly after uninstall.
-- [ ] No restoration mismatch occurred; any mismatch would have stopped release work for manual review.
-
-## Cleanup and promotion evidence
-
-- [x] Temporary source validation cleanup completed before promotion (not applicable; live source validation was not run).
-- [x] The verified managed v0.4.0 plugin is enabled after promotion.
-- [x] No source listener, temporary integration, disposable pane, or named test session remains.
-- [x] The repository was clean and `HEAD == origin/main` before exact-SHA CI validation.
-
-Select the CI run by immutable SHA, flatten all target artifacts, generate their checksum manifest, and run the same release validators:
-
-```sh
-set -eu
-evidence=${AGENT_CONTEXT_EVIDENCE_DIR:?}
-sha=$(cat "$evidence/release-sha.txt")
-test "$(git rev-parse HEAD)" = "$sha"
-test "$(git rev-parse origin/main)" = "$sha"
-run_id=$(gh run list --workflow ci.yml --commit "$sha" --limit 10 \
+run_id=$(gh run list --workflow ci.yml --commit "$RELEASE_SHA" --limit 10 \
   --json databaseId,headBranch,headSha \
-  --jq '.[] | select(.headBranch == "main" and .headSha == "'"$sha"'") | .databaseId' \
+  --jq '.[] | select(.headBranch == "main" and .headSha == "'"$RELEASE_SHA"'") | .databaseId' \
   | head -n 1)
 test -n "$run_id"
-test "$(gh run view "$run_id" --json headSha --jq .headSha)" = "$sha"
+test "$(gh run view "$run_id" --json headSha --jq .headSha)" = "$RELEASE_SHA"
 gh run watch "$run_id" --exit-status
-printf '%s\n' "$run_id" > "$evidence/pre-release-ci-run-id.txt"
-dist=$(mktemp -d "${TMPDIR:-/tmp}/agent-context-ci-assets.XXXXXX")
+printf '%s\n' "$run_id" > "$AGENT_CONTEXT_EVIDENCE_DIR/pre-release-ci-run-id.txt"
+
+dist=$(mktemp -d "${TMPDIR:-/tmp}/agent-context-${VERSION}-ci-assets.XXXXXX")
 gh run download "$run_id" --pattern 'herdr-agent-context-*' --dir "$dist/download"
-find "$dist/download" -type f -name 'herdr-agent-context-v0.4.0-*.tar.gz' \
-  -exec cp {} "$dist/" \;
+find "$dist/download" -type f -name "herdr-agent-context-${TAG}-*.tar.gz" -exec cp {} "$dist/" \;
 if command -v sha256sum >/dev/null 2>&1; then
-  (cd "$dist" && sha256sum herdr-agent-context-v0.4.0-*.tar.gz > SHA256SUMS)
+  (cd "$dist" && sha256sum "herdr-agent-context-${TAG}-"*.tar.gz > SHA256SUMS)
 else
-  (cd "$dist" && shasum -a 256 herdr-agent-context-v0.4.0-*.tar.gz > SHA256SUMS)
+  (cd "$dist" && shasum -a 256 "herdr-agent-context-${TAG}-"*.tar.gz > SHA256SUMS)
 fi
-sh scripts/verify-release-assets.sh 0.4.0 "$dist"
+sh scripts/verify-release-assets.sh "$VERSION" "$dist"
 for target in aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu; do
   mkdir "$dist/$target"
-  tar -xzf "$dist/herdr-agent-context-v0.4.0-$target.tar.gz" \
-    -C "$dist/$target" herdr-agent-context
+  tar -xzf "$dist/herdr-agent-context-${TAG}-$target.tar.gz" -C "$dist/$target" herdr-agent-context
   sh scripts/verify-glibc-baseline.sh "$dist/$target/herdr-agent-context" 2.18
 done
 ```
 
-- [x] Record the exact SHA and CI run ID under `$AGENT_CONTEXT_EVIDENCE_DIR`.
-- [x] All four downloaded CI archives pass checksum, content, executable, and Linux glibc `2.18` checks.
-- [x] Independent implementation and distribution review has no unresolved finding.
-- [x] Obtain explicit promotion approval before creating or pushing `v0.4.0` (approved 2026-08-30).
-- [x] After approval, tag CI and the Release workflow both pass for the recorded SHA.
-- [x] The public prerelease contains four archives plus `SHA256SUMS`.
-- [x] Public assets pass `scripts/verify-release-assets.sh 0.4.0`.
-- [x] The public URL installer installs a host binary byte-identical to its archive.
-- [x] Replace the managed v0.3.0 plugin with the verified managed v0.4.0 release.
+- [ ] Obtain explicit promotion approval after the exact-SHA CI and artifact gates pass. Record the approval and residual risks in `$AGENT_CONTEXT_EVIDENCE_DIR`.
+- [ ] Do not create or move a tag, create a release, or update the managed plugin before this approval.
+
+## Tag, publish, and verify
+
+- [ ] Create and push an annotated stable tag pointing at `$RELEASE_SHA`:
+
+```sh
+test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+git tag -a "$TAG" "$RELEASE_SHA" -m "Release $TAG"
+git push origin "$TAG"
+```
+
+- [ ] Wait for tag CI and the tag-driven Release workflow. The workflow validates `scripts/validate-release-tag.sh`, builds four archives, validates assets and Linux glibc compatibility, smoke-tests the installer, and creates a non-draft, non-prerelease latest release with deterministic notes.
+- [ ] Verify public stable/latest state, exact notes, and assets without mutation:
+
+```sh
+sh scripts/release-notes.sh render "$VERSION" > "$AGENT_CONTEXT_EVIDENCE_DIR/$TAG-notes.md"
+sh scripts/check-github-release.sh "$VERSION" "$AGENT_CONTEXT_EVIDENCE_DIR/$TAG-notes.md" ryonakae/herdr-agent-context
+```
+
+- [ ] Verify the public installer on the release host and compare its installed binary with the matching `$TAG` archive.
+- [ ] Update the managed plugin only after public verification:
+
+```sh
+herdr plugin install ryonakae/herdr-agent-context --ref "$TAG" --yes
+herdr plugin list --plugin ryonakae.agent-context --json
+```
+
+## Rerun recovery
+
+A rerun is safe only when `scripts/check-github-release.sh` reports `existing`: the tag, title, stable/latest state, deterministic generated-note blocks, and exact five assets must match. An `absent` result allows the workflow to create the release once.
+
+Stop promotion on an API or transport error, malformed response, conflicting release state/body/assets, or any other nonzero result. Do not move, delete, overwrite, or recreate a tag or GitHub Release to recover. Investigate the conflicting public state and obtain explicit approval for any subsequent action.
+
+## Optional live synthetic smoke
+
+Live source and integration smoke is optional when it would mutate a shared Herdr plugin registry or otherwise be unsafe. Automated coverage and exact-SHA artifact checks do not count as executed live smoke. If skipped, leave the smoke boxes unchecked and record the specific risk and approval in `$AGENT_CONTEXT_EVIDENCE_DIR`.
+
+- [ ] Before linking a source build, record the one managed plugin's version and requested ref as `$BASELINE_VERSION` and `$BASELINE_REF`; restore that exact baseline during cleanup.
+- [ ] Use only a disposable named Herdr session and synthetic Pi, Claude, and Codex prompts; keep pane IDs, checksums, run IDs, and redacted `agent.list` results outside the repository.
+- [ ] Confirm hook-free sidebar behavior, session binding, TTL clearing, and privacy-bounded logs for the supported backends.
+- [ ] If testing temporary official integrations, back up and restore exact file presence, link targets, and checksums; do not overwrite a restoration mismatch.
+- [ ] Remove the source listener, temporary integrations, synthetic agents/transcripts, disposable pane/session, and temporary state/config directories before promotion.
+- [ ] Confirm the managed `$TAG` plugin is enabled after public verification and that no duplicate listener remains.
+
+## Historical promotion records
+
+The following records are immutable evidence for prerelease promotions. Do not edit them.
 
 ## v0.2.0 promotion record
 
