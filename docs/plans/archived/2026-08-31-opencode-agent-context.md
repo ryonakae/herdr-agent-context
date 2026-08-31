@@ -162,7 +162,7 @@ The reader contract is:
 - [x] Task 1: Read OpenCode 1.x sessions into privacy-bounded display views.
 - [x] Task 2: Resolve OpenCode database configuration, CLI eligibility, authority, and conservative fallback binding.
 - [x] Task 3: Integrate OpenCode metadata and automatic tab/pane labels without regressing existing agents.
-- [ ] Task 4: Publish the OpenCode contract, complete independent review, and pass every repository validation gate.
+- [x] Task 4: Publish the OpenCode contract, complete independent review, and pass every repository validation gate.
 
 Implementation-time minor file changes or internal differences must be reflected in the relevant task. Ask the user before changing a requirement, Out of Scope item, or public contract.
 
@@ -423,29 +423,31 @@ Implementation-time minor file changes or internal differences must be reflected
 
 ## Final Validation
 
-- [ ] `cargo test opencode:: --lib --locked` — Expected: all OpenCode parser, resolver, backend, config-adjacent unit tests pass.
-- [ ] `cargo test --test listener opencode --locked` — Expected: all OpenCode runtime metadata and naming tests pass.
-- [ ] `cargo test --all-targets --locked` — Expected: all Rust unit, binary, and integration tests pass.
-- [ ] `cargo fmt --check` — Expected: no formatting differences.
-- [ ] `cargo clippy --all-targets -- -D warnings` — Expected: no warnings.
-- [ ] `cargo build --release --locked` — Expected: the local standalone release binary builds with bundled SQLite.
-- [ ] `sh tests/installer.sh` — Expected: installer positive and negative tests pass.
-- [ ] `sh tests/release-assets.sh` — Expected: four-target archive contract tests pass.
-- [ ] `sh tests/release-notes.sh` — Expected: existing changelog/release-note contract remains valid without altering released history.
-- [ ] `sh tests/prepare-release.sh` — Expected: release preparation contract tests pass.
-- [ ] `sh tests/release-tag.sh` — Expected: tag validation contract tests pass.
-- [ ] `sh tests/github-release.sh` — Expected: GitHub Release contract tests pass.
-- [ ] `actionlint .github/workflows/*.yml` — Expected: all workflows are valid.
-- [ ] `shellcheck scripts/*.sh tests/*.sh` — Expected: all POSIX shell files pass lint.
-- [ ] Four-target CI-equivalent builds: `cargo build --release --locked --target aarch64-apple-darwin`, `cargo build --release --locked --target x86_64-apple-darwin`, `cross build --release --locked --target aarch64-unknown-linux-gnu`, and `cross build --release --locked --target x86_64-unknown-linux-gnu` — Expected: bundled SQLite builds on each supported target.
-- [ ] `sh scripts/verify-glibc-baseline.sh target/aarch64-unknown-linux-gnu/release/herdr-agent-context 2.18 && sh scripts/verify-glibc-baseline.sh target/x86_64-unknown-linux-gnu/release/herdr-agent-context 2.18` — Expected: both Linux artifacts retain the glibc 2.18 baseline.
-- [ ] `if rg -n 'Command::new|std::process::Command|report_agent_session|report_agent\b' src/opencode; then exit 1; fi` — Expected: exits zero because the OpenCode backend has no subprocess dependency or canonical identity reporting call.
-- [ ] `if rg -n 'println!|eprintln!|dbg!' src/opencode; then exit 1; fi` — Expected: exits zero because the OpenCode backend has no direct transcript/title/message/environment/full-argv/row-JSON logging path.
-- [ ] `git diff --check` — Expected: no whitespace errors.
-- [ ] Independent code review — Expected: no unresolved blocking/high correctness, privacy, compatibility, or regression finding.
-- [ ] Requirement Coverage has no unimplemented or unverified item.
-- [ ] The plan and final diff agree, including any recorded minor implementation differences.
-- [ ] Only after every item above succeeds, move this plan unchanged in name to `docs/plans/archived/2026-08-31-opencode-agent-context.md`.
+- [x] `cargo test opencode:: --lib --locked` — Expected: all OpenCode parser, resolver, backend, config-adjacent unit tests pass.
+- [x] `cargo test --test listener opencode --locked` — Expected: all OpenCode runtime metadata and naming tests pass.
+- [x] `cargo test --all-targets --locked` — Expected: all Rust unit, binary, and integration tests pass.
+- [x] `cargo fmt --check` — Expected: no formatting differences.
+- [x] `cargo clippy --all-targets -- -D warnings` — Expected: no warnings.
+- [x] `cargo build --release --locked` — Expected: the local standalone release binary builds with bundled SQLite.
+- [x] `sh tests/installer.sh` — Expected: installer positive and negative tests pass.
+- [x] `sh tests/release-assets.sh` — Expected: four-target archive contract tests pass.
+- [x] `sh tests/release-notes.sh` — Expected: existing changelog/release-note contract remains valid without altering released history.
+- [x] `sh tests/prepare-release.sh` — Expected: release preparation contract tests pass.
+- [x] `sh tests/release-tag.sh` — Expected: tag validation contract tests pass.
+- [x] `sh tests/github-release.sh` — Expected: GitHub Release contract tests pass.
+- [x] `actionlint .github/workflows/*.yml` — Expected: all workflows are valid.
+- [x] `shellcheck scripts/*.sh tests/*.sh` — Expected: all POSIX shell files pass lint.
+- [x] Four-target CI-equivalent builds: `cargo build --release --locked --target aarch64-apple-darwin`, `cargo build --release --locked --target x86_64-apple-darwin`, `cross build --release --locked --target aarch64-unknown-linux-gnu`, and `cross build --release --locked --target x86_64-unknown-linux-gnu` — Expected: bundled SQLite builds on each supported target.
+- [x] `sh scripts/verify-glibc-baseline.sh target/aarch64-unknown-linux-gnu/release/herdr-agent-context 2.18 && sh scripts/verify-glibc-baseline.sh target/x86_64-unknown-linux-gnu/release/herdr-agent-context 2.18` — Expected: both Linux artifacts retain the glibc 2.18 baseline.
+- [x] `if rg -n 'Command::new|std::process::Command|report_agent_session|report_agent\b' src/opencode; then exit 1; fi` — Expected: exits zero because the OpenCode backend has no subprocess dependency or canonical identity reporting call.
+- [x] `if rg -n 'println!|eprintln!|dbg!' src/opencode; then exit 1; fi` — Expected: exits zero because the OpenCode backend has no direct transcript/title/message/environment/full-argv/row-JSON logging path.
+- [x] `git diff --check` — Expected: no whitespace errors.
+- [x] Independent code review — Expected: no unresolved blocking/high correctness, privacy, compatibility, or regression finding.
+- [x] Requirement Coverage has no unimplemented or unverified item.
+- [x] The plan and final diff agree, including any recorded minor implementation differences.
+- [x] Only after every item above succeeds, move this plan unchanged in name to `docs/plans/archived/2026-08-31-opencode-agent-context.md`.
+
+**Final validation record (2026-08-31):** OpenCode unit tests pass 35, OpenCode listener tests 9, the all-target suite passes 234 library, 7 binary, and 74 listener tests, and every listed lint, release-script, workflow, privacy, logging, formatting, and native release-build check succeeds. Both Apple targets build with bundled SQLite. Because the `cross` CLI was unavailable on the macOS host, the Linux builds ran inside the official cross-rs 0.2.5 target images with the images' target compilers and a stable Linux Rust toolchain; both artifacts pass the glibc 2.18 verifier. Independent review resolved all initial findings and approved the bounded-discovery correction with no new blocking/high issue. Requirement Coverage is complete and no blocker remains.
 
 ## Risks and Open Questions
 
