@@ -104,7 +104,7 @@ Establish a tested stable-release process in which `CHANGELOG.md` is the source 
 
 - Review base: `07165944aed8bebd0baf217d46603783f61c79d5`
 - [x] Task 1: Establish changelog and deterministic release-note contracts.
-- [ ] Task 2: Add atomic release preparation and stable-tag validation.
+- [x] Task 2: Add atomic release preparation and stable-tag validation.
 - [ ] Task 3: Convert CI and publication workflow to tested stable releases.
 - [ ] Task 4: Make release operations reusable and document the new process.
 - [ ] Task 5: Complete independent review and full validation.
@@ -191,6 +191,12 @@ Implementation may reflect minor file changes in the relevant task. Ask the user
 - Successful preparation changes only expected release-owned version fields.
 - Every tested failure is atomic.
 - Tag validation rejects all unsupported tag and ancestry cases before artifact build.
+
+**Implementation outcome:**
+- Added POSIX preparation and tag-validation entrypoints with temporary-root and isolated-local-remote tests.
+- Preparation validates the authored latest changelog and all current release-owned versions before atomically replacing generated outputs; only the root lockfile package version is changed.
+- Extended version verification to require the root lockfile package and latest changelog identity, and derived installer/archive fixtures from the plugin manifest version.
+- Focused validation passed: `sh tests/prepare-release.sh && sh tests/release-tag.sh && sh tests/installer.sh && sh tests/release-assets.sh`, ShellCheck for touched scripts/tests, and `git diff --check`.
 
 **Validation:**
 - Run: `sh tests/prepare-release.sh && sh tests/release-tag.sh && sh tests/installer.sh && sh tests/release-assets.sh`
