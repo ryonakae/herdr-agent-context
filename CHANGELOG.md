@@ -5,6 +5,18 @@ All notable changes to herdr-agent-context are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v0.5.0
+
+### Added
+
+- Added OpenCode 1.x session context to the Herdr sidebar, automatic tab names, and automatic pane names for persistent root TUI sessions.
+- Added conservative OpenCode binding through authoritative session IDs, non-fork `--session` hints, sticky process bindings, and uniquely changed same-directory sessions.
+- Added read-only bundled SQLite discovery through the standard OpenCode data directory, `OPENCODE_DB`, and additional configured database paths.
+
+### Changed
+
+- Bounded OpenCode fallback discovery by session age, compatible candidates, raw database rows, and SQLite query work. Busy, malformed, ambiguous, or oversized scans fail closed without refreshing metadata.
+
 ## v0.4.0
 
 ### Added

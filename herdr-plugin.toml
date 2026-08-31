@@ -1,6 +1,6 @@
 id = "ryonakae.agent-context"
 name = "Agent Context"
-version = "0.4.0"
+version = "0.5.0"
 min_herdr_version = "0.8.0"
 description = "Display Pi, Claude Code, Codex, and OpenCode session context with optional tab and pane labels."
 platforms = ["macos", "linux"]
