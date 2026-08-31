@@ -510,12 +510,30 @@ impl Runtime {
                     Some(&view.session_identity),
                 )),
             ),
-            Some(BackendOutcome::FailedBinding { agent, binding }) => (
-                NamingContext::Failed {
-                    agent: (*agent).to_owned(),
-                },
-                Some(contributor_binding_identity(agent, binding, None)),
-            ),
+            Some(BackendOutcome::FailedBinding {
+                agent,
+                binding,
+                session_identity,
+            }) => {
+                let context = session_identity.as_ref().map_or_else(
+                    || NamingContext::Failed {
+                        agent: (*agent).to_owned(),
+                    },
+                    |session_identity| NamingContext::Supported {
+                        agent: (*agent).to_owned(),
+                        identity: session_identity.clone(),
+                        display: NamingDisplayState::Failed,
+                    },
+                );
+                (
+                    context,
+                    Some(contributor_binding_identity(
+                        agent,
+                        binding,
+                        session_identity.as_deref(),
+                    )),
+                )
+            }
             Some(BackendOutcome::FailedIdentity {
                 agent,
                 session_identity,

@@ -107,6 +107,7 @@ pub enum BackendOutcome {
     FailedBinding {
         agent: &'static str,
         binding: Binding,
+        session_identity: Option<String>,
     },
     FailedIdentity {
         agent: &'static str,

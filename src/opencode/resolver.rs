@@ -504,6 +504,76 @@ mod tests {
     }
 
     #[test]
+    fn exact_identity_rejects_duplicate_rows_inside_one_malformed_database() {
+        let temp = tempfile::tempdir().unwrap();
+        let cwd = temp.path().join("project");
+        std::fs::create_dir(&cwd).unwrap();
+        let database = temp.path().join("duplicates.db");
+        let connection = Connection::open(&database).unwrap();
+        connection
+            .execute_batch(
+                "
+                CREATE TABLE session (id TEXT, parent_id TEXT, directory TEXT NOT NULL, title TEXT NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, time_archived INTEGER);
+                CREATE TABLE message (id TEXT, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL);
+                CREATE TABLE part (id TEXT, message_id TEXT NOT NULL, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL);
+                ",
+            )
+            .unwrap();
+        for title in ["First", "Second"] {
+            connection
+                .execute(
+                    "INSERT INTO session VALUES ('ses_duplicate', NULL, ?1, ?2, 1, 1, NULL)",
+                    params![cwd.to_str().unwrap(), title],
+                )
+                .unwrap();
+        }
+        drop(connection);
+
+        assert_eq!(
+            OpenCodeScanner.resolve_exact(&[database], &cwd, "ses_duplicate"),
+            Err(OpenCodeResolveError::Read)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ordinary_scan_matches_parent_and_symlink_cwd_aliases_canonically() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let cwd = temp.path().join("project");
+        let child = cwd.join("child");
+        let alias = temp.path().join("project-link");
+        std::fs::create_dir_all(&child).unwrap();
+        symlink(&cwd, &alias).unwrap();
+        let database = temp.path().join("aliases.db");
+        let connection = create_database(&database);
+        let now = 100 * 24 * 60 * 60 * 1_000_i64;
+        connection
+            .execute(
+                "INSERT INTO session VALUES ('ses_parent_alias', NULL, ?1, 'Parent alias', 1, ?2, NULL)",
+                params![child.join("..").to_str().unwrap(), now],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO session VALUES ('ses_symlink_alias', NULL, ?1, 'Symlink alias', 1, ?2, NULL)",
+                params![alias.to_str().unwrap(), now],
+            )
+            .unwrap();
+
+        let candidates = OpenCodeScanner.scan_database(&database, &cwd, now).unwrap();
+        let identities: std::collections::HashSet<_> = candidates
+            .iter()
+            .map(|candidate| candidate.session.display.session_identity.as_str())
+            .collect();
+        assert_eq!(
+            identities,
+            std::collections::HashSet::from(["ses_parent_alias", "ses_symlink_alias"])
+        );
+    }
+
+    #[test]
     fn ordinary_scan_is_recent_root_cwd_bounded_and_uses_per_session_fingerprints() {
         let temp = tempfile::tempdir().unwrap();
         let cwd = temp.path().join("project");

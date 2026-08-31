@@ -195,6 +195,7 @@ impl CodexBackend {
                             BackendOutcome::FailedBinding {
                                 agent: CODEX_AGENT,
                                 binding,
+                                session_identity: None,
                             },
                         );
                         continue;

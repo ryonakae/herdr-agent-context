@@ -231,6 +231,7 @@ impl OpenCodeBackend {
                                 BackendOutcome::FailedBinding {
                                     agent: OPENCODE_AGENT,
                                     binding: sticky.binding,
+                                    session_identity: Some(sticky.session_identity),
                                 },
                             );
                             continue;

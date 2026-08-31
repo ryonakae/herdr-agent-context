@@ -69,6 +69,7 @@ impl PiBackend {
                         None => BackendOutcome::FailedBinding {
                             agent: PI_AGENT,
                             binding: binding.clone(),
+                            session_identity: None,
                         },
                     },
                 };

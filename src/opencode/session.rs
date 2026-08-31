@@ -2,6 +2,7 @@ use crate::backend::DisplayView;
 use crate::text::{complete_line, display_line};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -21,7 +22,7 @@ pub struct RowFingerprint {
 pub struct SessionFingerprint {
     pub session_time_created: i64,
     pub session_time_updated: i64,
-    pub session_title: String,
+    pub content_digest: [u8; 32],
     pub latest_message: Option<RowFingerprint>,
     pub latest_part: Option<RowFingerprint>,
 }
@@ -87,16 +88,8 @@ pub fn scan_sessions(
     expected_cwd: &Path,
     now_millis: i64,
 ) -> Result<Vec<OpenCodeSessionView>, OpenCodeSessionError> {
-    let input_cwd = expected_cwd
-        .to_str()
-        .ok_or(OpenCodeSessionError::InvalidSession)?
-        .to_owned();
     let expected_cwd =
         normalized_absolute(expected_cwd).ok_or(OpenCodeSessionError::InvalidSession)?;
-    let canonical_cwd = expected_cwd
-        .to_str()
-        .ok_or(OpenCodeSessionError::InvalidSession)?
-        .to_owned();
     with_read_transaction(database_path, |transaction| {
         validate_required_schema(transaction)?;
         let mut statement = transaction
@@ -106,19 +99,12 @@ pub fn scan_sessions(
                  WHERE parent_id IS NULL
                    AND time_archived IS NULL
                    AND time_updated >= ?1
-                   AND (directory = ?2 OR directory = ?3)
-                 ORDER BY time_updated DESC, id ASC
-                 LIMIT ?4",
+                 ORDER BY time_updated DESC, id ASC",
             )
             .map_err(classify_sql_error)?;
         let rows = statement
             .query_map(
-                rusqlite::params![
-                    now_millis.saturating_sub(ORDINARY_MAX_AGE_MILLIS),
-                    input_cwd,
-                    canonical_cwd,
-                    ORDINARY_MAX_CANDIDATES as i64
-                ],
+                rusqlite::params![now_millis.saturating_sub(ORDINARY_MAX_AGE_MILLIS)],
                 |row| {
                     let id: String = row.get(0)?;
                     let _: Option<String> = row.get(1)?;
@@ -142,6 +128,9 @@ pub fn scan_sessions(
             };
             if directory == expected_cwd {
                 identities.push(identity);
+                if identities.len() == ORDINARY_MAX_CANDIDATES {
+                    break;
+                }
             }
         }
         drop(statement);
@@ -157,12 +146,50 @@ pub fn scan_sessions(
 }
 
 fn validate_required_schema(transaction: &Transaction<'_>) -> Result<(), OpenCodeSessionError> {
+    for table in ["session", "message", "part"] {
+        validate_identity_primary_key(transaction, table)?;
+    }
     for query in [
         "SELECT id, parent_id, directory, title, time_created, time_updated, time_archived FROM session LIMIT 0",
         "SELECT id, session_id, time_created, time_updated, data FROM message LIMIT 0",
         "SELECT id, message_id, session_id, time_created, time_updated, data FROM part LIMIT 0",
     ] {
         transaction.prepare(query).map_err(classify_sql_error)?;
+    }
+    Ok(())
+}
+
+fn validate_identity_primary_key(
+    transaction: &Transaction<'_>,
+    table: &str,
+) -> Result<(), OpenCodeSessionError> {
+    let mut statement = transaction
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(classify_sql_error)?;
+    let rows = statement
+        .query_map([], |row| {
+            let name: String = row.get(1)?;
+            let declared_type: String = row.get(2)?;
+            let primary_key_position: i64 = row.get(5)?;
+            Ok((name, declared_type, primary_key_position))
+        })
+        .map_err(classify_sql_error)?;
+    let mut identity_type = None;
+    let mut primary_key = Vec::new();
+    for row in rows {
+        let (name, declared_type, position) = row.map_err(classify_sql_error)?;
+        if name == "id" {
+            identity_type = Some(declared_type);
+        }
+        if position > 0 {
+            primary_key.push((position, name));
+        }
+    }
+    primary_key.sort();
+    if !identity_type.is_some_and(|declared_type| declared_type.eq_ignore_ascii_case("TEXT"))
+        || primary_key != [(1, "id".to_owned())]
+    {
+        return Err(OpenCodeSessionError::IncompatibleSchema);
     }
     Ok(())
 }
@@ -252,6 +279,7 @@ fn read_session_from_transaction(
             id: part.id.clone(),
         })
         .max();
+    let content_digest = session_content_digest(&session, &messages, &parts);
 
     let mut first_user = None;
     let mut latest_user_order = None;
@@ -318,11 +346,54 @@ fn read_session_from_transaction(
         fingerprint: SessionFingerprint {
             session_time_created: session.time_created,
             session_time_updated: session.time_updated,
-            session_title: session.title,
+            content_digest,
             latest_message,
             latest_part,
         },
     }))
+}
+
+fn session_content_digest(
+    session: &SessionRow,
+    messages: &[MessageRow],
+    parts: &HashMap<String, Vec<PartRow>>,
+) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest_field(&mut digest, session.id.as_bytes());
+    digest_field(&mut digest, session.directory.as_bytes());
+    digest_field(&mut digest, session.title.as_bytes());
+    digest_field(&mut digest, &session.time_created.to_be_bytes());
+    digest_field(&mut digest, &session.time_updated.to_be_bytes());
+    for message in messages {
+        digest_field(&mut digest, message.id.as_bytes());
+        digest_field(&mut digest, &message.time_created.to_be_bytes());
+        digest_field(&mut digest, &message.time_updated.to_be_bytes());
+        digest_field(
+            &mut digest,
+            serde_json::to_string(&message.data)
+                .unwrap_or_default()
+                .as_bytes(),
+        );
+        if let Some(message_parts) = parts.get(&message.id) {
+            for part in message_parts {
+                digest_field(&mut digest, part.id.as_bytes());
+                digest_field(&mut digest, &part.time_created.to_be_bytes());
+                digest_field(&mut digest, &part.time_updated.to_be_bytes());
+                digest_field(
+                    &mut digest,
+                    serde_json::to_string(&part.data)
+                        .unwrap_or_default()
+                        .as_bytes(),
+                );
+            }
+        }
+    }
+    digest.finalize().into()
+}
+
+fn digest_field(digest: &mut Sha256, value: &[u8]) {
+    digest.update((value.len() as u64).to_be_bytes());
+    digest.update(value);
 }
 
 fn read_messages(
@@ -990,6 +1061,75 @@ mod tests {
     }
 
     #[test]
+    fn fingerprint_changes_when_earlier_visible_text_streams_after_a_later_tool_part() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let database = temp.path().join("opencode.db");
+        let connection = create_database(&database);
+        insert_session(&connection, "ses_stream", &project, "Title", 1);
+        insert_message(
+            &connection,
+            "msg_user",
+            "ses_stream",
+            1,
+            1,
+            r#"{"role":"user"}"#,
+        );
+        insert_part(
+            &connection,
+            "part_user",
+            "msg_user",
+            "ses_stream",
+            1,
+            1,
+            r#"{"type":"text","text":"Prompt"}"#,
+        );
+        insert_message(
+            &connection,
+            "msg_assistant",
+            "ses_stream",
+            2,
+            2,
+            r#"{"role":"assistant"}"#,
+        );
+        insert_part(
+            &connection,
+            "part_text",
+            "msg_assistant",
+            "ses_stream",
+            2,
+            2,
+            r#"{"type":"text","text":"Initial"}"#,
+        );
+        insert_part(
+            &connection,
+            "part_tool",
+            "msg_assistant",
+            "ses_stream",
+            3,
+            3,
+            r#"{"type":"tool","tool":"synthetic"}"#,
+        );
+        let initial = read_session(&database, "ses_stream", &project)
+            .unwrap()
+            .unwrap();
+
+        connection
+            .execute(
+                "UPDATE part SET data = ?1, time_updated = 100 WHERE id = 'part_text'",
+                [r#"{"type":"text","text":"Streamed"}"#],
+            )
+            .unwrap();
+        let streamed = read_session(&database, "ses_stream", &project)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(streamed.display.last_message.as_deref(), Some("Streamed"));
+        assert_ne!(streamed.fingerprint, initial.fingerprint);
+    }
+
+    #[test]
     fn rejects_nonroot_mismatched_or_malformed_sessions_without_misreading_session_message() {
         let temp = tempfile::tempdir().unwrap();
         let project = temp.path().join("project");
@@ -1089,7 +1229,7 @@ mod tests {
         drop(connection);
         assert_eq!(
             read_session(&unsupported, "ses_synthetic", &project),
-            Err(OpenCodeSessionError::Read)
+            Err(OpenCodeSessionError::IncompatibleSchema)
         );
     }
 

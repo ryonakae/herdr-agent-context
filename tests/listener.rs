@@ -4635,6 +4635,67 @@ fn opencode_mixed_tab_uses_visual_order_and_restores_manual_baseline_on_ambiguit
 }
 
 #[test]
+fn opencode_local_read_failure_retains_session_id_tab_and_pane_ownership() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    let state = temp.path().join("state");
+    fs::create_dir(&project).unwrap();
+    fs::create_dir(&state).unwrap();
+    let database = temp.path().join("opencode.db");
+    let connection = create_opencode_database(&database);
+    let id = "ses_local_failure_naming";
+    let now = opencode_now_millis();
+    insert_opencode_session(
+        &connection,
+        id,
+        &project,
+        "Observed title",
+        "Observed prompt",
+        Some("Observed answer"),
+        now,
+    );
+    let mut api = single_pi_tab_api("tab baseline");
+    api.agents = vec![opencode_agent(&project, "w1:p1")];
+    api.process_args
+        .insert("w1:p1".into(), vec!["opencode".into()]);
+    api.process_pids.insert("w1:p1".into(), 100);
+    api.snapshot.panes[0].label = Some("pane baseline".into());
+    let mut runtime = opencode_runtime(&database, true, true);
+    let socket = Path::new("/tmp/herdr-opencode-local-failure-naming.sock");
+    runtime.initialize_tab_names(&state, socket).unwrap();
+    runtime.initialize_pane_names(&state, socket).unwrap();
+
+    runtime.reconcile(&mut api).unwrap();
+    assert!(api.reports.is_empty());
+    connection
+        .execute(
+            "UPDATE session SET title = 'Bound title', time_updated = ?1 WHERE id = ?2",
+            params![now + 10, id],
+        )
+        .unwrap();
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(api.snapshot.tabs[0].label, "Bound title");
+    assert_eq!(api.snapshot.panes[0].label.as_deref(), Some("Bound title"));
+    let tab_renames = api.renames.len();
+    let pane_renames = api.pane_renames.len();
+
+    connection.execute_batch("BEGIN EXCLUSIVE").unwrap();
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(api.renames.len(), tab_renames);
+    assert_eq!(api.pane_renames.len(), pane_renames);
+    assert_eq!(api.snapshot.tabs[0].label, "Bound title");
+    assert_eq!(api.snapshot.panes[0].label.as_deref(), Some("Bound title"));
+    connection.execute_batch("ROLLBACK").unwrap();
+
+    runtime.reconcile(&mut api).unwrap();
+    assert_eq!(api.reports.len(), 2);
+    assert_eq!(
+        api.reports.last().unwrap().session_name.as_deref(),
+        Some("Bound title")
+    );
+}
+
+#[test]
 fn opencode_sidebar_and_shared_naming_apply_exact_80_scalar_and_20_column_bounds() {
     let temp = tempfile::tempdir().unwrap();
     let project = temp.path().join("project");
