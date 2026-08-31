@@ -5,10 +5,17 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 use std::time::Duration;
 
 const ORDINARY_MAX_AGE_MILLIS: i64 = 30 * 24 * 60 * 60 * 1_000;
 const ORDINARY_MAX_CANDIDATES: usize = 25;
+const ORDINARY_MAX_ROWS: usize = 250;
+const ORDINARY_PROGRESS_INTERVAL: i32 = 1_000;
+const ORDINARY_MAX_PROGRESS_CALLBACKS: usize = 100;
 use thiserror::Error;
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -92,48 +99,9 @@ pub fn scan_sessions(
         normalized_absolute(expected_cwd).ok_or(OpenCodeSessionError::InvalidSession)?;
     with_read_transaction(database_path, |transaction| {
         validate_required_schema(transaction)?;
-        let mut statement = transaction
-            .prepare(
-                "SELECT id, parent_id, directory, title, time_created, time_updated, time_archived
-                 FROM session
-                 WHERE parent_id IS NULL
-                   AND time_archived IS NULL
-                   AND time_updated >= ?1
-                 ORDER BY time_updated DESC, id ASC",
-            )
-            .map_err(classify_sql_error)?;
-        let rows = statement
-            .query_map(
-                rusqlite::params![now_millis.saturating_sub(ORDINARY_MAX_AGE_MILLIS)],
-                |row| {
-                    let id: String = row.get(0)?;
-                    let _: Option<String> = row.get(1)?;
-                    let directory: String = row.get(2)?;
-                    let _: String = row.get(3)?;
-                    let _: i64 = row.get(4)?;
-                    let _: i64 = row.get(5)?;
-                    let _: Option<i64> = row.get(6)?;
-                    Ok((id, directory))
-                },
-            )
-            .map_err(classify_sql_error)?;
-        let mut identities = Vec::new();
-        for row in rows {
-            let (identity, directory) = row.map_err(classify_sql_error)?;
-            if identity.trim().is_empty() {
-                return Err(OpenCodeSessionError::InvalidSession);
-            }
-            let Some(directory) = normalized_absolute(Path::new(&directory)) else {
-                return Err(OpenCodeSessionError::InvalidSession);
-            };
-            if directory == expected_cwd {
-                identities.push(identity);
-                if identities.len() == ORDINARY_MAX_CANDIDATES {
-                    break;
-                }
-            }
-        }
-        drop(statement);
+        let identities = with_ordinary_progress_limit(transaction, || {
+            read_ordinary_identities(transaction, &expected_cwd, now_millis)
+        })?;
 
         let mut sessions = Vec::with_capacity(identities.len());
         for identity in identities {
@@ -143,6 +111,90 @@ pub fn scan_sessions(
         }
         Ok(sessions)
     })
+}
+
+fn with_ordinary_progress_limit<T>(
+    transaction: &Transaction<'_>,
+    read: impl FnOnce() -> Result<T, OpenCodeSessionError>,
+) -> Result<T, OpenCodeSessionError> {
+    let callbacks = Arc::new(AtomicUsize::new(0));
+    transaction
+        .progress_handler(
+            ORDINARY_PROGRESS_INTERVAL,
+            Some({
+                let callbacks = Arc::clone(&callbacks);
+                move || callbacks.fetch_add(1, Ordering::Relaxed) >= ORDINARY_MAX_PROGRESS_CALLBACKS
+            }),
+        )
+        .map_err(classify_sql_error)?;
+    let result = read();
+    transaction
+        .progress_handler::<fn() -> bool>(0, None)
+        .map_err(classify_sql_error)?;
+    result
+}
+
+fn read_ordinary_identities(
+    transaction: &Transaction<'_>,
+    expected_cwd: &Path,
+    now_millis: i64,
+) -> Result<Vec<String>, OpenCodeSessionError> {
+    let mut statement = transaction
+        .prepare(
+            "SELECT id, parent_id, directory, title, time_created, time_updated, time_archived
+             FROM session
+             WHERE parent_id IS NULL
+               AND time_archived IS NULL
+               AND time_updated >= ?1
+             ORDER BY time_updated DESC, id ASC
+             LIMIT ?2",
+        )
+        .map_err(classify_sql_error)?;
+    let rows = statement
+        .query_map(
+            rusqlite::params![
+                now_millis.saturating_sub(ORDINARY_MAX_AGE_MILLIS),
+                (ORDINARY_MAX_ROWS + 1) as i64
+            ],
+            |row| {
+                let id: String = row.get(0)?;
+                let _: Option<String> = row.get(1)?;
+                let directory: String = row.get(2)?;
+                let _: String = row.get(3)?;
+                let _: i64 = row.get(4)?;
+                let _: i64 = row.get(5)?;
+                let _: Option<i64> = row.get(6)?;
+                Ok((id, directory))
+            },
+        )
+        .map_err(classify_sql_error)?;
+    let rows = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(classify_sql_error)?;
+    if rows.len() > ORDINARY_MAX_ROWS {
+        return Err(OpenCodeSessionError::Read);
+    }
+
+    let mut normalized_directories = HashMap::new();
+    let mut identities = Vec::new();
+    for (identity, directory) in rows {
+        if identity.trim().is_empty() {
+            return Err(OpenCodeSessionError::InvalidSession);
+        }
+        let directory = normalized_directories
+            .entry(directory.clone())
+            .or_insert_with(|| normalized_absolute(Path::new(&directory)));
+        let Some(directory) = directory else {
+            return Err(OpenCodeSessionError::InvalidSession);
+        };
+        if directory == expected_cwd {
+            identities.push(identity);
+            if identities.len() == ORDINARY_MAX_CANDIDATES {
+                break;
+            }
+        }
+    }
+    Ok(identities)
 }
 
 fn validate_required_schema(transaction: &Transaction<'_>) -> Result<(), OpenCodeSessionError> {
@@ -1494,6 +1546,68 @@ mod tests {
             .unwrap();
         assert_eq!(current.display.tab_name_source.as_deref(), Some("After"));
         assert_eq!(current.display.last_message.as_deref(), Some("After"));
+    }
+
+    #[test]
+    fn ordinary_scan_fails_closed_instead_of_binding_from_251_recent_roots() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        let other = temp.path().join("other");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::create_dir(&other).unwrap();
+        let database = temp.path().join("opencode.db");
+        let connection = create_database(&database);
+        let now = 100 * 24 * 60 * 60 * 1_000_i64;
+        insert_session(&connection, "ses_target", &project, "Target", now + 1);
+        connection
+            .execute(
+                "WITH RECURSIVE seq(value) AS (
+                     SELECT 1
+                     UNION ALL
+                     SELECT value + 1 FROM seq WHERE value < 250
+                 )
+                 INSERT INTO session
+                 SELECT printf('ses_other_%03d', value), NULL, ?1, 'Other', 1, ?2 - value, NULL
+                 FROM seq",
+                params![other.to_str().unwrap(), now],
+            )
+            .unwrap();
+        drop(connection);
+
+        assert_eq!(
+            scan_sessions(&database, &project, now),
+            Err(OpenCodeSessionError::Read)
+        );
+    }
+
+    #[test]
+    fn ordinary_scan_interrupts_sql_work_even_when_only_one_recent_root_matches() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let database = temp.path().join("opencode.db");
+        let connection = create_database(&database);
+        let now = 100 * 24 * 60 * 60 * 1_000_i64;
+        insert_session(&connection, "ses_target", &project, "Target", now);
+        connection
+            .execute(
+                "WITH RECURSIVE seq(value) AS (
+                     SELECT 1
+                     UNION ALL
+                     SELECT value + 1 FROM seq WHERE value < 100000
+                 )
+                 INSERT INTO session
+                 SELECT printf('ses_old_%06d', value), NULL, ?1, 'Old', 1, 0, NULL
+                 FROM seq",
+                [project.to_str().unwrap()],
+            )
+            .unwrap();
+        drop(connection);
+
+        assert_eq!(
+            scan_sessions(&database, &project, now),
+            Err(OpenCodeSessionError::Read)
+        );
     }
 
     #[test]
