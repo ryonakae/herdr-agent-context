@@ -107,7 +107,7 @@ Establish a tested stable-release process in which `CHANGELOG.md` is the source 
 - [x] Task 2: Add atomic release preparation and stable-tag validation.
 - [x] Task 3: Convert CI and publication workflow to tested stable releases.
 - [x] Task 4: Make release operations reusable and document the new process.
-- [ ] Task 5: Complete independent review and full validation.
+- [x] Task 5: Complete independent review and full validation.
 
 Implementation may reflect minor file changes in the relevant task. Ask the user before changing requirements, Out of Scope, or public contracts.
 
@@ -330,6 +330,14 @@ Implementation may reflect minor file changes in the relevant task. Ask the user
 - Requirement Coverage has no gap.
 - Plan is archived only after successful validation.
 
+**Gate summary:**
+- Review range: `07165944aed8bebd0baf217d46603783f61c79d5..cbb1e2e` across five implementation/correction commits.
+- Initial independent review found four blocking/high defects: fenced comment state leaked into structural parsing, Markdown-equivalent mandatory headings bypassed duplicate detection, release-note validation claims lacked workflow dependencies, and release-file replacement could leave a partial update.
+- Correction commit `cbb1e2e` added regression coverage and resolved all four findings. Scoped re-review marked every finding resolved and found no correction-induced blocking/high defect.
+- Review retained two nonblocking findings without scope expansion: the optional smoke setup assumes an existing managed GitHub plugin, and changelog ordering uses AWK numeric comparison for impractically large SemVer components.
+- Final validation passed at `cbb1e2e`: all six release shell suites, 194 library tests, 6 binary tests, 65 listener tests, format, Clippy, release build, ShellCheck, Actionlint, version/changelog consistency, and whitespace checks.
+- No tag, GitHub Release, managed plugin, Herdr integration, or global Herdr state was mutated.
+
 **Validation:**
 - Run the complete Final Validation command set below.
 - Expected: every command succeeds and reviewer has no unresolved blocking/high finding.
@@ -359,25 +367,25 @@ Implementation may reflect minor file changes in the relevant task. Ask the user
 
 ## Final Validation
 
-- [ ] `sh tests/release-notes.sh` — Expected: changelog check/render/verify positive and negative cases pass.
-- [ ] `sh tests/prepare-release.sh` — Expected: synchronization and all failure-atomicity cases pass.
-- [ ] `sh tests/release-tag.sh` — Expected: stable tag, version consistency, and ancestry cases pass.
-- [ ] `sh tests/github-release.sh` — Expected: confirmed 404 and exact existing/latest paths return the correct decisions; all non-404 API/transport/latest/state/body/asset/malformed-response cases fail closed.
-- [ ] `sh tests/installer.sh` — Expected: installer contract remains green with dynamic version fixtures.
-- [ ] `sh tests/release-assets.sh` — Expected: archive/version contract remains green with dynamic version fixtures.
-- [ ] `cargo test --all-targets --locked` — Expected: all Rust tests pass.
-- [ ] `cargo fmt --check` — Expected: formatting passes.
-- [ ] `cargo clippy --all-targets -- -D warnings` — Expected: no warnings.
-- [ ] `cargo build --release --locked` — Expected: release build succeeds.
-- [ ] `shellcheck scripts/*.sh tests/*.sh` — Expected: no diagnostics.
-- [ ] `actionlint .github/workflows/*.yml` — Expected: both workflows are valid.
-- [ ] `sh scripts/verify-version.sh v0.4.0` — Expected: manifests, lockfile, and latest changelog are consistent.
-- [ ] `sh scripts/release-notes.sh check 0.4.0` — Expected: current tracked release identity is valid.
-- [ ] `git diff --check` — Expected: no whitespace errors.
-- [ ] Manual GitHub mutation test: N/A — no tag/release is created in this implementation; workflow behavior is verified through script tests, static review, and actionlint.
-- [ ] Requirement Coverage has no unmatched item.
-- [ ] Plan and actual changes agree.
-- [ ] After every item succeeds, move this plan unchanged in name to `docs/plans/archived/`.
+- [x] `sh tests/release-notes.sh` — Expected: changelog check/render/verify positive and negative cases pass.
+- [x] `sh tests/prepare-release.sh` — Expected: synchronization and all failure-atomicity cases pass.
+- [x] `sh tests/release-tag.sh` — Expected: stable tag, version consistency, and ancestry cases pass.
+- [x] `sh tests/github-release.sh` — Expected: confirmed 404 and exact existing/latest paths return the correct decisions; all non-404 API/transport/latest/state/body/asset/malformed-response cases fail closed.
+- [x] `sh tests/installer.sh` — Expected: installer contract remains green with dynamic version fixtures.
+- [x] `sh tests/release-assets.sh` — Expected: archive/version contract remains green with dynamic version fixtures.
+- [x] `cargo test --all-targets --locked` — Expected: all Rust tests pass.
+- [x] `cargo fmt --check` — Expected: formatting passes.
+- [x] `cargo clippy --all-targets -- -D warnings` — Expected: no warnings.
+- [x] `cargo build --release --locked` — Expected: release build succeeds.
+- [x] `shellcheck scripts/*.sh tests/*.sh` — Expected: no diagnostics.
+- [x] `actionlint .github/workflows/*.yml` — Expected: both workflows are valid.
+- [x] `sh scripts/verify-version.sh v0.4.0` — Expected: manifests, lockfile, and latest changelog are consistent.
+- [x] `sh scripts/release-notes.sh check 0.4.0` — Expected: current tracked release identity is valid.
+- [x] `git diff --check` — Expected: no whitespace errors.
+- [x] Manual GitHub mutation test: N/A — no tag/release is created in this implementation; workflow behavior is verified through script tests, static review, and actionlint.
+- [x] Requirement Coverage has no unmatched item.
+- [x] Plan and actual changes agree.
+- [x] After every item succeeds, move this plan unchanged in name to `docs/plans/archived/`.
 
 ## Risks and Open Questions
 
