@@ -2,7 +2,7 @@ name: Release
 
 on:
   push:
-    tags: ['v*']
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
 
 permissions:
   contents: read
@@ -11,7 +11,27 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Validate stable release tag
+        run: sh scripts/validate-release-tag.sh "$GITHUB_REF_NAME" "$GITHUB_SHA"
+      - name: Render deterministic release notes
+        run: |
+          set -eu
+          version=${GITHUB_REF_NAME#v}
+          sh scripts/release-notes.sh render "$version" >release-notes.md
+      - uses: actions/upload-artifact@v5
+        with:
+          name: release-notes
+          path: release-notes.md
+          if-no-files-found: error
+
   build:
+    needs: validate
     name: Build ${{ matrix.target }}
     strategy:
       fail-fast: false
@@ -32,7 +52,6 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
-      - run: sh scripts/verify-version.sh "${GITHUB_REF_NAME}"
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -48,6 +67,7 @@ jobs:
         run: |
           set -eu
           version=${GITHUB_REF_NAME#v}
+          sh scripts/verify-version.sh "$GITHUB_REF_NAME"
           binary="target/${{ matrix.target }}/release/herdr-agent-context"
           strip "$binary" || true
           stage="dist/${{ matrix.target }}"
@@ -61,8 +81,8 @@ jobs:
           path: dist/herdr-agent-context-v*.tar.gz
           if-no-files-found: error
 
-  publish-prerelease:
-    needs: build
+  publish:
+    needs: [validate, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -73,11 +93,15 @@ jobs:
           pattern: herdr-agent-context-*
           path: dist
           merge-multiple: true
+      - uses: actions/download-artifact@v5
+        with:
+          name: release-notes
+          path: .
       - name: Verify assets
         run: |
           set -eu
           version=${GITHUB_REF_NAME#v}
-          (cd dist && sha256sum herdr-agent-context-v*.tar.gz >SHA256SUMS)
+          (cd dist && sha256sum herdr-agent-context-v*.tar.gz | LC_ALL=C sort -k2 >SHA256SUMS)
           sh scripts/verify-version.sh "$GITHUB_REF_NAME"
           sh scripts/verify-release-assets.sh "$version" dist
       - name: Smoke-test release installer
@@ -95,10 +119,47 @@ jobs:
             -C "$expected" herdr-agent-context
           test -x "$install_root/bin/herdr-agent-context"
           cmp "$expected/herdr-agent-context" "$install_root/bin/herdr-agent-context"
-      - uses: softprops/action-gh-release@v2
-        with:
-          prerelease: true
-          generate_release_notes: true
-          files: |
-            dist/herdr-agent-context-v*.tar.gz
+      - name: Publish or verify stable GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          version=${GITHUB_REF_NAME#v}
+          decision=$(sh scripts/check-github-release.sh "$version" release-notes.md "$GITHUB_REPOSITORY")
+          case "$decision" in
+            existing)
+              exit 0
+              ;;
+            absent)
+              ;;
+            *)
+              echo "unexpected GitHub Release decision: $decision" >&2
+              exit 1
+              ;;
+          esac
+
+          gh release create "$GITHUB_REF_NAME" \
+            --verify-tag \
+            --target "$GITHUB_SHA" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file release-notes.md \
+            --latest \
+            "dist/herdr-agent-context-v${version}-aarch64-apple-darwin.tar.gz" \
+            "dist/herdr-agent-context-v${version}-x86_64-apple-darwin.tar.gz" \
+            "dist/herdr-agent-context-v${version}-aarch64-unknown-linux-gnu.tar.gz" \
+            "dist/herdr-agent-context-v${version}-x86_64-unknown-linux-gnu.tar.gz" \
             dist/SHA256SUMS
+
+          decision=$(sh scripts/check-github-release.sh "$version" release-notes.md "$GITHUB_REPOSITORY")
+          case "$decision" in
+            existing)
+              ;;
+            absent)
+              echo "GitHub Release remains absent after creation" >&2
+              exit 1
+              ;;
+            *)
+              echo "unexpected GitHub Release decision after creation: $decision" >&2
+              exit 1
+              ;;
+          esac

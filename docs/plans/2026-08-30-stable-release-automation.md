@@ -105,7 +105,7 @@ Establish a tested stable-release process in which `CHANGELOG.md` is the source 
 - Review base: `07165944aed8bebd0baf217d46603783f61c79d5`
 - [x] Task 1: Establish changelog and deterministic release-note contracts.
 - [x] Task 2: Add atomic release preparation and stable-tag validation.
-- [ ] Task 3: Convert CI and publication workflow to tested stable releases.
+- [x] Task 3: Convert CI and publication workflow to tested stable releases.
 - [ ] Task 4: Make release operations reusable and document the new process.
 - [ ] Task 5: Complete independent review and full validation.
 
@@ -242,6 +242,12 @@ Implementation may reflect minor file changes in the relevant task. Ask the user
 - Pull requests and `main` exercise all release scripts without publishing.
 - Only a validated stable tag can reach publication.
 - The workflow is rerun-safe and keeps current distribution artifacts unchanged.
+
+**Implementation outcome:**
+- Added a POSIX GitHub Release decision checker with a fake-`gh` subprocess suite covering confirmed absence, exact existing/latest state, malformed responses, API/transport failures, strict body verification, and exact unique assets.
+- Split stable publication into pre-build validation/rendering, the unchanged four-target build and compatibility gates, and least-privilege rerun-safe publication with exact-SHA release creation and post-create verification.
+- Extended CI with every nonpublishing release-contract suite and added static workflow assertions that keep lookup logic in the tested checker and reject prerelease/generated-note publication.
+- Focused validation passed: all release shell suites, ShellCheck for all scripts/tests, Actionlint for both workflows, forbidden-pattern search, and `git diff --check`.
 
 **Validation:**
 - Run: `sh tests/github-release.sh`
