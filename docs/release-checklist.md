@@ -188,3 +188,12 @@ The following records are immutable evidence for prerelease promotions. Do not e
 - Managed plugin: enabled `v0.4.0`, requested ref `v0.4.0`, resolved commit `4d8daae4262a12a49b5d8094480daa17bb9a4f29`; its installed binary is byte-identical to the public archive.
 - Integrations after promotion: Pi, Claude, and Codex `current (v8)`.
 - Independent implementation and release-candidate reviews found no unresolved blocking/high finding. Live source and integration smoke was not run because Herdr's plugin registry is global; promotion proceeded after explicit user acceptance of that residual risk.
+
+## v0.5.0 aborted stable promotion record
+
+- Release SHA and immutable tag target: `add94714a73f41c3cd949589bd55bf09a6105809`.
+- Exact-HEAD pre-release CI: `33414653154`; quality and all four target jobs passed. All four downloaded archives and both Linux glibc `2.18` baselines passed local verification.
+- Tag CI: `33422588422`; quality and all four target jobs passed.
+- Release workflow: `33422588457`; validation stopped before builds or publication because the runner's ShellCheck reported `SC2015` for two pre-existing short-circuit checks in `scripts/verify-release-assets.sh`.
+- No GitHub Release was created, and the managed plugin remained on `v0.4.0`. The `v0.5.0` tag was not moved, deleted, overwritten, or recreated.
+- The user approved recovery through a new `v0.5.1` release after replacing the ambiguous checks with explicit conditionals and repeating every release gate.

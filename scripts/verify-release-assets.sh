@@ -47,8 +47,12 @@ herdr-agent-context" || fail "unexpected archive contents: $asset"
     extracted="$TMP/$target"
     mkdir "$extracted"
     tar -xzf "$DIST/$asset" -C "$extracted" || fail "release asset cannot be extracted: $asset"
-    test -f "$extracted/herdr-agent-context" && test ! -L "$extracted/herdr-agent-context" && test -x "$extracted/herdr-agent-context" || fail "release binary is not a regular executable: $asset"
-    test -f "$extracted/LICENSE" && test ! -L "$extracted/LICENSE" || fail "release license is not a regular file: $asset"
+    if [ ! -f "$extracted/herdr-agent-context" ] || [ -L "$extracted/herdr-agent-context" ] || [ ! -x "$extracted/herdr-agent-context" ]; then
+        fail "release binary is not a regular executable: $asset"
+    fi
+    if [ ! -f "$extracted/LICENSE" ] || [ -L "$extracted/LICENSE" ]; then
+        fail "release license is not a regular file: $asset"
+    fi
     test "$(link_count "$extracted/herdr-agent-context")" -eq 1 || fail "release binary is linked: $asset"
     test "$(link_count "$extracted/LICENSE")" -eq 1 || fail "release license is linked: $asset"
     expected_count=$((expected_count + 1))
